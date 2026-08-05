@@ -41,7 +41,9 @@ scout2map-bridge/
 │   ├── msg/              #   AirQuality, Particulate, EnvSnapshot, BridgeStatus
 │   └── README.md         #   ★ 필드별 상세 레퍼런스
 └── scout2map_bridge/     # 브릿지 노드 본체
-    ├── scout2map_bridge/pico_bridge_node.py
+    ├── scout2map_bridge/
+    │   ├── pico_bridge_node.py
+    │   └── fake_sensor_node.py   # 하드웨어 없이 쓰는 가짜 퍼블리셔 (6절)
     ├── config/           #   파라미터 YAML
     ├── launch/
     ├── udev/             #   장치 경로 고정 규칙
@@ -256,8 +258,95 @@ ros2 topic echo /sensors/env_snapshot
 ```
 
 ---
+## 6. 하드웨어 없이 개발하기
 
-## 6. 발행 토픽
+UGV가 한 대뿐이라 팀원이 돌아가며 실기를 쓸 수 없다.
+그래서 **브릿지와 완전히 동일한 토픽·타입으로 가짜 값을 발행하는 노드**를 함께 넣었다.
+구독하는 쪽 코드 입장에서는 진짜 하드웨어와 구분되지 않으므로,
+이벤트 엔진이나 관제 서버를 Pico 2 없이 끝까지 개발할 수 있다.
+
+```bash
+ros2 launch scout2map_bridge fake_sensors.launch.py
+```
+
+실행하면 다음이 나온다.
+
+```
+[INFO] [fake_sensors]: fake_sensors up: scenario=normal (change it with: ros2 param set /fake_sensors scenario <name>)
+[INFO] [fake_sensors]: available scenarios: normal, gas_leak, high_temp, low_light, dust_storm, warmup, sensor_dropout, link_loss
+```
+
+이 상태에서 7절의 모든 토픽이 실제 주기대로 발행된다.
+**진짜 브릿지와 토픽 이름이 같으므로 `pico_bridge`와 동시에 실행하면 안 된다.**
+값이 뒤섞여 원인을 알 수 없는 동작을 하게 된다.
+가짜 데이터임은 `/bridge/status`의 `port` 필드가 `SIMULATED`인 것으로 구분한다.
+
+### 시나리오
+
+값의 흐름을 시나리오로 바꾼다. 기본은 평온한 실내 상태(`normal`)다.
+
+| 시나리오 | 무엇이 일어나는가 | 무엇을 시험하는가 |
+|---|---|---|
+| `normal` | 실내 평상값에 약간의 흔들림 | 평상시 오탐이 나지 않는지 |
+| `gas_leak` | TVOC가 60 → 4500ppb, eCO2가 450 → 3200ppm으로 상승 | 가스 이벤트 발화와 해제 |
+| `high_temp` | 온도가 24 → 62℃로 상승 | 고온 이벤트 |
+| `low_light` | 조도가 320 → 8lux로 하락 | 저조도 이벤트 |
+| `dust_storm` | PM2.5가 7 → 180µg/m³로 상승 | 먼지 관련 판정 |
+| `warmup` | ENS160이 계속 `validity=1` | **워밍업 값을 걸러내는지** |
+| `sensor_dropout` | ENS160만 발행 중단 | **`age_s` 증가와 `valid=false` 처리** |
+| `link_loss` | 전 센서 발행 중단, `link_ok=false` | 통신 두절 이벤트 |
+
+뒤의 세 개가 특히 중요하다. 정상 데이터만으로 짠 코드는 대개 여기서 무너진다.
+`warmup`은 ENS160이 전원 인가 후 약 3분간 겪는 실제 상태이고,
+`sensor_dropout`은 배선이 헐거워졌을 때 그대로 재현된다.
+이때 `valid` 플래그를 확인하지 않은 코드는 **센서가 죽은 뒤에도 마지막 값으로 계속 이벤트를 낸다.**
+
+### 실행 중에 시나리오 바꾸기
+
+노드를 끄지 않고 파라미터만 바꾸면 된다.
+값이 서서히 오르는 동안 이벤트 엔진이 어느 지점에서 발화하는지 눈으로 볼 수 있다.
+
+```bash
+ros2 param set /fake_sensors scenario gas_leak
+ros2 param set /fake_sensors scenario normal      # 되돌리기
+```
+
+시나리오를 바꾸면 상승 곡선이 처음부터 다시 시작된다.
+기본 상승 시간은 30초이며, 빨리 보고 싶으면 줄인다.
+
+```bash
+ros2 launch scout2map_bridge fake_sensors.launch.py scenario:=gas_leak ramp_seconds:=5.0
+```
+
+임계값을 정확히 맞춰 시험할 때는 흔들림을 꺼서 값을 매끄럽게 만든다.
+
+```bash
+ros2 launch scout2map_bridge fake_sensors.launch.py noise:=0.0
+```
+
+### 값이 나오는지 확인
+
+```bash
+ros2 topic echo /sensors/env_snapshot
+```
+
+`sensor_dropout`으로 바꾼 뒤 같은 명령을 보면
+`air_quality_age_s`가 계속 커지고 `air_quality_valid`가 false로 바뀐다.
+이 동작이 실제 하드웨어에서 센서가 죽었을 때와 동일하다.
+
+### 개발 순서 제안
+
+1. `fake_sensors`로 노드를 만들고 시나리오별로 동작을 확인한다.
+2. 특히 `warmup`, `sensor_dropout`, `link_loss`에서 오작동하지 않는지 본다.
+3. 팀장에게 코드를 넘겨 실기에서 검증한다.
+
+1과 2를 충분히 하면 실기 검증에서 잡을 것이 거의 남지 않는다.
+반대로 이 단계를 건너뛰면 한 대뿐인 하드웨어 앞에서 기본적인 버그를 잡게 된다.
+
+---
+
+
+## 7. 발행 토픽
 
 | 토픽 | 타입 | 주기 |
 |---|---|---|
@@ -280,7 +369,7 @@ ros2 topic echo /sensors/env_snapshot
 
 ---
 
-## 7. 다른 워크스페이스에서 메시지만 쓰고 싶다면
+## 8. 다른 워크스페이스에서 메시지만 쓰고 싶다면
 
 이벤트 엔진처럼 브릿지 없이 메시지 타입만 필요한 경우에도
 현재는 이 레포를 통째로 클론해 두 패키지를 함께 빌드하면 된다.
@@ -291,7 +380,7 @@ ros2 topic echo /sensors/env_snapshot
 
 ---
 
-## 8. 커밋하지 않는 것
+## 9. 커밋하지 않는 것
 
 이 레포는 워크스페이스가 아니므로 `build/`, `install/`, `log/`가 여기에 생기지 않는다.
 그 디렉토리들은 워크스페이스 루트(`~/scout2map_ws/`)에 생기며, 그쪽에서 제외한다.
