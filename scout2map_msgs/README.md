@@ -20,11 +20,24 @@ ROS2에서 토픽으로 흐르는 데이터는 미리 정해진 타입을 가진
 직렬화 코드를 함께 생성한다. `from scout2map_msgs.msg import EnvSnapshot`이 동작하는 이유다.
 
 **따라서 `.msg`를 수정하면 반드시 재빌드하고 다시 source해야 한다.**
+빌드는 패키지 디렉토리가 아니라 **워크스페이스 루트**에서 실행한다.
 
 ```bash
-colcon build --packages-select scout2map_msgs && source install/setup.bash
-ros2 interface show scout2map_msgs/msg/EnvSnapshot   # 생성 결과 확인
+cd ~/scout2map_ws          # colcon은 항상 워크스페이스 루트에서 돌린다
+colcon build --packages-select scout2map_msgs
+source install/setup.bash  # 새 터미널마다 필요하다
 ```
+
+수정한 정의가 실제로 반영됐는지는 아래로 확인한다.
+방금 추가한 필드가 목록에 보이면 성공이다.
+
+```bash
+ros2 interface show scout2map_msgs/msg/EnvSnapshot
+```
+
+이 단계를 건너뛰면 노드가 예전 정의를 그대로 쓰기 때문에,
+"그런 필드가 없다"거나 타입이 맞지 않는다는 형태의 오류가 난다.
+원인을 찾기 어려운 부류이므로 습관을 들이는 편이 낫다.
 
 `Temperature`, `Illuminance` 같은 흔한 타입은 ROS가 `sensor_msgs`로 기본 제공하므로
 정의하지 않았다. 표준에 없는 것만 여기에 만든다.

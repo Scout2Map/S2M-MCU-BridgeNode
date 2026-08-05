@@ -79,12 +79,26 @@ deque가 가득 차면 **가장 오래된 라인부터 버린다.** ROS 측이 �
 `stale_*` 값은 각 센서의 발행 주기보다 넉넉히 크게 잡아야 한다.
 1Hz 센서에 1.0초를 주면 지터 한 번에 `valid` 플래그가 깜빡거린다.
 
-값은 `config/pico_bridge.yaml`에서 수정하거나 실행 시 덮어쓴다.
+값은 `config/pico_bridge.yaml`에서 수정하는 것이 기본이다.
+런치 파일이 이 YAML을 읽어 노드에 넘긴다.
+
+일회성으로 바꿔 볼 때는 `ros2 run`에 직접 넘긴다.
+다만 이 경우 YAML은 읽히지 않으므로, 명시하지 않은 값은 코드의 기본값이 쓰인다.
 
 ```bash
-ros2 launch scout2map_bridge pico_bridge.launch.py
-ros2 run scout2map_bridge pico_bridge --ros-args -p port:=/dev/ttyACM0 -p publish_raw_json:=true
+ros2 run scout2map_bridge pico_bridge --ros-args \
+  -p port:=/dev/ttyACM0 \
+  -p publish_raw_json:=true
 ```
+
+현재 적용된 값은 실행 중에 조회할 수 있다.
+
+```bash
+ros2 param list /pico_bridge
+ros2 param get /pico_bridge stale_air_quality_s
+```
+
+설치와 빌드 절차는 [레포 루트 README](../README.md)에 있다.
 
 ---
 
