@@ -1,0 +1,5 @@
+# Stable device path for the Scout2Map sensor fusion MCU (Raspberry Pi Pico 2 CDC).
+# Verify the ID pair with `lsusb` first, the default pico-sdk CDC pair is 2e8a:000a.
+# Install: sudo cp 99-scout2map-pico.rules /etc/udev/rules.d/
+#          sudo udevadm control --reload-rules && sudo udevadm trigger
+SUBSYSTEM=="tty", ATTRS{idVendor}=="2e8a", ATTRS{idProduct}=="000a", SYMLINK+="scout2map_pico", MODE="0666"
