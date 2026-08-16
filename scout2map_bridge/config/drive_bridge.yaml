@@ -49,3 +49,23 @@ drive_bridge:
     # treated as uniform quantisation noise, q^2/12.
     odom_vx_variance: 0.00000027
     odom_wz_variance: 0.0000094
+
+    # --- Slip detection ---
+    # This is a four wheel skid steer on a 140mm wheelbase, so turning drags
+    # all four wheels sideways and the chassis rotates less than the geometry
+    # predicts. skid_factor corrects for that; it is a property of the tyres
+    # and the floor, not something derivable on paper.
+    #
+    # 1.0 is the UNMEASURED default and will make every deliberate turn read
+    # as slip. Measure before trusting slip_ratio:
+    #   ros2 run scout2map_bridge skid_calib
+    skid_factor: 1.0
+
+    # BNO055 reads 1-2 deg/s at rest before its gyro calibrates, which the
+    # slip signal would read as real rotation. Measure with the firmware
+    # repository's s2m_imu_view.py --bias and enter the value in rad/s.
+    gyro_bias_radps: 0.0
+
+    # Below these the comparison is noise dividing into noise
+    slip_rate_floor_radps: 0.10
+    slip_min_wheel_speed_mps: 0.02

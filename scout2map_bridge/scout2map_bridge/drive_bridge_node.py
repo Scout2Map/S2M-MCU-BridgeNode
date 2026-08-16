@@ -73,6 +73,24 @@ class DriveBridge(Node):
         # Fallback until BOOT_INFO arrives
         self.declare_parameter("default_track_width_m", 0.24)
 
+        # --- Slip detection ---
+        # This chassis is a four wheel skid steer, so a turn is produced by
+        # dragging the wheels sideways rather than by rolling them. The
+        # geometric track width therefore under predicts how much wheel speed
+        # difference a given yaw rate needs. The correction is empirical and
+        # typically lands between 1.2 and 1.5; leaving it at 1.0 makes every
+        # deliberate turn look like slip.
+        # Measure it with tools/skid_calib.py before trusting the signal.
+        self.declare_parameter("skid_factor", 1.0)
+
+        # BNO055 reports 1-2 deg/s at rest before its gyro calibrates.
+        # Measure with s2m_imu_view.py --bias in the firmware repository.
+        self.declare_parameter("gyro_bias_radps", 0.0)
+
+        # Below this the ratio denominator is noise, so the signal is muted
+        self.declare_parameter("slip_rate_floor_radps", 0.10)
+        self.declare_parameter("slip_min_wheel_speed_mps", 0.02)
+
         # Covariance knobs. Encoder odometry is decent in x, poor in yaw.
         self.declare_parameter("odom_xy_variance", 0.001)
         self.declare_parameter("odom_yaw_variance", 0.01)
@@ -102,6 +120,10 @@ class DriveBridge(Node):
         self._openloop_mult = float(gp("odom_openloop_multiplier").value)
         self._odom_vx_var = float(gp("odom_vx_variance").value)
         self._odom_wz_var = float(gp("odom_wz_variance").value)
+        self._skid_factor = float(gp("skid_factor").value)
+        self._gyro_bias = float(gp("gyro_bias_radps").value)
+        self._slip_floor = float(gp("slip_rate_floor_radps").value)
+        self._slip_min_speed = float(gp("slip_min_wheel_speed_mps").value)
 
         # ---------------- QoS ----------------
         sensor_qos = QoSProfile(
@@ -175,6 +197,17 @@ class DriveBridge(Node):
             f"drive_bridge up: port={self._port} "
             f"cmd={cmd_hz:.0f}Hz timeout={self._cmd_timeout:.2f}s "
             f"limits={self._max_lin:.2f}m/s {self._max_ang:.2f}rad/s")
+
+        if self._skid_factor == 1.0:
+            self.get_logger().warn(
+                "skid_factor is 1.0, the unmeasured default. On a four wheel "
+                "skid steer every deliberate turn will register as slip. "
+                "Measure it with tools/skid_calib.py before using slip_ratio.")
+        if self._gyro_bias == 0.0:
+            self.get_logger().warn(
+                "gyro_bias_radps is 0.0. The BNO055 reads 1-2 deg/s at rest "
+                "before its gyro calibrates, which the slip signal will read "
+                "as rotation. Measure with s2m_imu_view.py --bias.")
 
     # ------------------------------------------------------------------
     # Serial callbacks
@@ -268,8 +301,9 @@ class DriveBridge(Node):
         self._publish_imu(stamp, qw, qx, qy, qz, gyro_z, acc_x, acc_y, acc_z, status)
         self._publish_range(stamp, dist_mm)
         self._publish_battery(stamp, batt_mv, status)
+        slip = self._compute_slip(spd_l, spd_r, gyro_z, status)
         self._cache_status(timestamp_ms, enc_l, enc_r, spd_l, spd_r,
-                           duty_l, duty_r, status, calib)
+                           duty_l, duty_r, status, calib, slip)
         self._warn_on_status_change(status)
 
     def _on_diag(self, payload):
@@ -474,8 +508,45 @@ class DriveBridge(Node):
         msg.design_capacity = float("nan")
         self._pub_batt.publish(msg)
 
+    def _compute_slip(self, spd_l, spd_r, gyro_z, status):
+        """Compare the two independent yaw rate estimates.
+
+        Returns (yaw_enc, yaw_imu, error, ratio, valid). Emits a signal only;
+        deciding what counts as slip is the event engine's job.
+        """
+        v_l = spd_l / proto.MMPS_PER_MPS
+        v_r = spd_r / proto.MMPS_PER_MPS
+
+        # Effective track width, not the geometric one. On a skid steer the
+        # wheels scrub through a turn, so the chassis rotates less than pure
+        # rolling would predict.
+        effective_track = self._track_width * self._skid_factor
+        if effective_track <= 0.0:
+            return 0.0, 0.0, 0.0, 0.0, False
+
+        yaw_enc = (v_r - v_l) / effective_track
+        yaw_imu = gyro_z * proto.GYRO_SCALE * DEG_TO_RAD - self._gyro_bias
+        error = yaw_enc - yaw_imu
+
+        # Gates. Any one of these makes the comparison meaningless, and a
+        # meaningless number that looks plausible is worse than no number.
+        moving = max(abs(v_l), abs(v_r)) >= self._slip_min_speed
+        valid = (
+            bool(status & proto.STATUS_IMU_OK)
+            and bool(status & proto.STATUS_IMU_CALIBRATED)
+            and not (status & proto.STATUS_OPENLOOP)
+            and moving
+        )
+
+        # Normalise against whichever estimate is larger, with a floor so a
+        # near stationary chassis cannot divide a small error into a big ratio
+        scale = max(abs(yaw_enc), abs(yaw_imu), self._slip_floor)
+        ratio = abs(error) / scale
+
+        return yaw_enc, yaw_imu, error, ratio, valid
+
     def _cache_status(self, timestamp_ms, enc_l, enc_r, spd_l, spd_r,
-                      duty_l, duty_r, status, calib):
+                      duty_l, duty_r, status, calib, slip):
         msg = DriveStatus()
         msg.mcu_timestamp_ms = timestamp_ms
         msg.encoder_left = enc_l
@@ -497,6 +568,9 @@ class DriveBridge(Node):
         msg.batt_dead = bool(status & proto.STATUS_BATT_DEAD)
         (msg.calib_sys, msg.calib_gyro,
          msg.calib_accel, msg.calib_mag) = proto.unpack_calib(calib)
+        (msg.yaw_rate_encoder_radps, msg.yaw_rate_imu_radps,
+         msg.yaw_rate_error_radps, msg.slip_ratio,
+         msg.slip_signal_valid) = slip
         self._pending_status = msg
 
     def _publish_status(self):

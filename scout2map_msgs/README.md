@@ -327,3 +327,33 @@ ros2 topic echo /drive/diagnostics --once
 모터 부하 아래에서 추정하면 모르는 것만 못하다.
 
 와이어 포맷 자체는 [`../scout2map_bridge/PROTOCOL.md`](../scout2map_bridge/PROTOCOL.md)에 있다.
+
+### `DriveStatus`의 슬립 신호
+
+`DriveStatus`에 회전 슬립 관련 필드 다섯 개가 있다.
+**판정이 아니라 신호이며, 임계값과 디바운스는 이벤트 엔진이 정한다.**
+
+| 필드 | 타입 | 단위 | 설명 |
+|---|---|---|---|
+| `yaw_rate_encoder_radps` | float32 | rad/s | 휠 속도차 기반 추정 |
+| `yaw_rate_imu_radps` | float32 | rad/s | 자이로 실측 − 바이어스 |
+| `yaw_rate_error_radps` | float32 | rad/s | 위 둘의 차, 부호 있음 |
+| `slip_ratio` | float32 | − | 정규화 불일치. 접지 시 0 근처 |
+| `slip_signal_valid` | bool | − | false면 위 넷을 무시 |
+
+```python
+if msg.slip_signal_valid and msg.slip_ratio > 0.4:
+    # 디바운스를 거친 뒤 슬립 이벤트로 승격
+    ...
+```
+
+`slip_signal_valid`를 확인하지 않으면 IMU 워밍업 중이나 엔코더 유실 상태의
+무의미한 값으로 이벤트가 발생한다.
+
+**임계값을 정하기 전에 `skid_factor`가 측정되었는지 먼저 확인한다.**
+미측정 상태에서는 정상 회전이 0.26, 진짜 슬립이 0.30으로 거의 붙어 있어
+어떤 임계값도 동작하지 않는다. 측정 절차는
+[브릿지 README 22절](../scout2map_bridge/README.md#22-슬립-검출-신호)에 있다.
+
+**직진 헛돎은 이 신호로 잡히지 않는다.** 양쪽이 함께 헛돌면 두 추정이
+일치하기 때문이다. 회전 슬립 전용으로 다룬다.

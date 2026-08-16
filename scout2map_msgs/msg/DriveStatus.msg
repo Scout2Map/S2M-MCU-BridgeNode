@@ -53,6 +53,29 @@ uint32 mcu_reboot_count         # incremented when mcu_timestamp_ms jumps backwa
 uint64 frames_ok
 uint64 crc_errors
 
+# --- Slip detection signals ---
+# Two independent estimates of how fast the chassis is turning. They agree
+# while the wheels grip and diverge when they do not, which is the whole
+# basis of the slip event.
+#
+# This is a SIGNAL, not a verdict. Thresholds, debounce and marker emission
+# belong to the event engine. Publishing a raw discrepancy keeps the tuning
+# in one place instead of splitting it across two repositories.
+#
+# NOTE: this only catches ROTATIONAL slip. Wheels spinning in a straight
+# line produce encoder motion with no yaw change, and the IMU also reports
+# no yaw change, so the two agree and nothing is flagged. See the bridge
+# README for why the longitudinal case is not covered here.
+float32 yaw_rate_encoder_radps  # from wheel speeds and the effective track width
+float32 yaw_rate_imu_radps      # gyro_z with the measured bias removed
+float32 yaw_rate_error_radps    # encoder minus IMU, signed
+float32 slip_ratio              # normalised discrepancy, 0.0 when they agree
+
+# False when the comparison is meaningless: IMU uncalibrated, encoders lost,
+# or the chassis moving too slowly for either estimate to mean anything.
+# Ignore every field above when this is false.
+bool slip_signal_valid
+
 # --- Values reported by BOOT_INFO, zero until it arrives ---
 uint8  proto_version
 uint8  fw_major
