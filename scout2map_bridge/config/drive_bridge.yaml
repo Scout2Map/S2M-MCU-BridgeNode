@@ -1,0 +1,51 @@
+drive_bridge:
+  ros__parameters:
+    # Prefer the udev symlink: both MCUs appear as /dev/ttyACM* otherwise
+    port: "/dev/scout2map_drive"
+    baudrate: 115200
+
+    # TF frames
+    odom_frame: "odom"
+    base_frame: "base_link"
+    imu_frame: "imu_link"
+    range_frame: "range_link"
+
+    # Set false when robot_localization or another node owns odom -> base_link
+    publish_tf: true
+
+    # Command repetition. The MCU stops after 300ms of silence, so this must
+    # stay comfortably below that even if a few frames are lost.
+    command_rate_hz: 20.0
+
+    # No cmd_vel within this window and the bridge commands a stop itself
+    command_timeout_s: 0.25
+
+    # Clamps applied before the command goes down. The firmware clamps too,
+    # but doing it here keeps the reported command honest.
+    max_linear_mps: 0.20       # rated 58RPM, not the 76RPM no-load figure
+    max_angular_radps: 0.80    # below the 1.67 mechanical limit, for scan quality
+
+    # Telemetry arrives at 50Hz; this is a generous silence threshold
+    link_timeout_s: 0.5
+    status_rate_hz: 10.0
+
+    # Distance sensor geometry. Change these when swapping the analog IR
+    # part for the VL53L0X: that one reads 0.03 to 1.20 m.
+    range_min_m: 0.04
+    range_max_m: 0.30
+    range_fov_rad: 0.14
+
+    # Used only until BOOT_INFO reports the real value
+    default_track_width_m: 0.24
+
+    # Odometry trust. Encoder odometry is good in x, weaker in yaw, and
+    # close to meaningless once the MCU falls back to open loop.
+    odom_xy_variance: 0.001
+    odom_yaw_variance: 0.01
+    odom_openloop_multiplier: 100.0
+
+    # Twist is a direct measurement rather than an integration, so it carries
+    # its own error. Derived from the 1.8 mm/s speed quantum (SPEED_WINDOW=4)
+    # treated as uniform quantisation noise, q^2/12.
+    odom_vx_variance: 0.00000027
+    odom_wz_variance: 0.0000094

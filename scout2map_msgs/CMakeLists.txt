@@ -14,6 +14,8 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/Particulate.msg"
   "msg/EnvSnapshot.msg"
   "msg/BridgeStatus.msg"
+  "msg/DriveStatus.msg"
+  "msg/DriveDiagnostics.msg"
   DEPENDENCIES std_msgs
 )
 

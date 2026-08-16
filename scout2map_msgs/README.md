@@ -261,3 +261,69 @@ AHT21의 온도 정확도 ±0.5℃를 표준편차 약 0.25℃로 보면 `varian
 
 주행 제어 MCU(STM32) 관련 메시지도 이 패키지에 함께 추가할 예정이며,
 토픽은 `drive/` 네임스페이스를 쓴다.
+
+---
+
+## 9. 주행 제어 메시지 (STM32)
+
+주행 제어 MCU에서 오는 값은 대부분 ROS 표준 타입으로 나간다.
+Nav2와 SLAM이 그대로 받아먹는 타입을 커스텀으로 바꾸면 손해이기 때문이다.
+
+| 토픽 | 타입 | 주기 |
+|---|---|---|
+| `/drive/odom` | `nav_msgs/Odometry` | 50Hz |
+| `/drive/imu` | `sensor_msgs/Imu` | 50Hz |
+| `/drive/range` | `sensor_msgs/Range` | 50Hz |
+| `/drive/battery` | `sensor_msgs/BatteryState` | 50Hz |
+| `/drive/status` | `scout2map_msgs/DriveStatus` | 10Hz |
+| `/drive/diagnostics` | `scout2map_msgs/DriveDiagnostics` | 요청 시 |
+
+커스텀이 필요한 것은 표준에 대응물이 없는 두 가지뿐이다.
+모터 듀티, 폴트 래치 상태, 엔코더 원시 카운트, BNO055 캘리브레이션 진행도는
+어느 표준 메시지에도 자리가 없다.
+
+### `DriveStatus`
+
+주행부 상태 전반이다. 상태 비트필드를 원본 그대로(`status_flags`) 실으면서
+동시에 개별 `bool`로도 풀어 두었으므로, 소비자가 마스킹할 필요가 없다.
+
+특히 중요한 두 필드가 있다.
+
+**`openloop`** — 엔코더 신호가 끊겨 MCU가 개루프로 폴백한 상태다.
+이때 오도메트리는 명령값에 기반한 추정이므로 신뢰할 수 없다.
+브릿지가 `Odometry` 공분산을 100배로 부풀리지만, 이벤트 판정 쪽에서도
+이 플래그를 봐야 한다.
+
+**`estop_latched`** — 래치되어 있으므로 속도 명령을 아무리 보내도 움직이지
+않는다. `/drive/clear_fault` 서비스를 호출해야 풀린다.
+"명령을 보냈는데 로봇이 안 움직인다"의 첫 번째 확인 대상이다.
+
+`calib_sys` / `calib_gyro` / `calib_accel` / `calib_mag`는 각각 0~3이며
+3이 완료다. 지자계가 3에 도달하기 전에는 절대 방위가 드리프트한다.
+
+### `DriveDiagnostics`
+
+요청했을 때만 발행된다. 원시 ADC 카운트와 I2C 오류 카운터가 들어 있어,
+없는 센서와 멈춘 버스와 잘못된 주소를 구분할 수 있다.
+스케일된 값만으로는 이 셋이 모두 그럴듯해 보인다.
+
+```bash
+ros2 service call /drive/request_diagnostics std_srvs/srv/Trigger
+ros2 topic echo /drive/diagnostics --once
+```
+
+### 표준 메시지 쪽에서 주의할 점
+
+**`Imu`의 각속도는 Z만 실린다.** 와이어에 `gyro_z`밖에 없기 때문이다.
+롤/피치 각속도 공분산은 1e6으로 채워 "값 없음"을 표시한다.
+
+**`Range`의 두 특수값이 다른 뜻이다.** 측정 범위 밖은 `+inf`,
+최소 거리 이내(장애물이 코앞에 있으나 거리 불명)는 `min_range`로 나간다.
+후자를 `inf`로 처리하면 바로 앞 장애물이 빈 공간으로 기록되므로 반대로 했다.
+
+**`BatteryState.voltage`가 `NaN`일 수 있다.** ADC가 아직 값을 보고하지
+않았다는 뜻이며, 이때 `present`가 false다. 0V로 오해하면 안 된다.
+`percentage`는 항상 `NaN`이다. 이 팩의 방전 곡선을 특성화한 적이 없고,
+모터 부하 아래에서 추정하면 모르는 것만 못하다.
+
+와이어 포맷 자체는 [`../scout2map_bridge/PROTOCOL.md`](../scout2map_bridge/PROTOCOL.md)에 있다.

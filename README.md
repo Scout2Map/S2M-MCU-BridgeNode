@@ -8,28 +8,38 @@ RPi5에서 동작하며, ROS2 패키지 두 개로 구성된다.
 ## 1. 시스템 내 위치
 
 ```
-[ 센서들 ]                    [ 센서 퓨전 MCU ]        [ RPi5 / ROS2 ]
+[ 환경 센서 ]                 [ 센서 퓨전 MCU ]        [ RPi5 / ROS2 ]
 AHT21   ─ I2C1 ┐
 ENS160  ─ I2C1 ┤
 BH1750  ─ I2C0 ┼──────────▶  Raspberry Pi Pico 2  ──▶  pico_bridge  ──▶  /sensors/*
-PMS7003 ─ UART ┘              (JSON per line)          (이 레포)          이벤트 엔진
-                                                                          맵 마커 노드
-                                                                          관제 서버
+PMS7003 ─ UART ┘              (JSON per line)                                │
+                                                                             ▼
+[ 구동계 ]                    [ 주행 제어 MCU ]                          이벤트 엔진
+BTS7960 ×2 ────┐                                                        맵 마커 노드
+엔코더 ×2  ────┼──────────▶  STM32F103C8T6    ◀──▶  drive_bridge  ──▶  관제 서버
+BNO055    ────┤              (binary + CRC16)          │                 Nav2 / SLAM
+GP2D120X  ────┘                    ▲                   │
+                                   └───── /cmd_vel ────┘
 ```
 
-MCU는 센서를 각자의 주기로 읽어 JSON 한 줄씩 USB CDC로 내보낸다.
-브릿지는 그 라인을 파싱해 ROS2 토픽으로 재발행한다.
-**이 레포의 목적은 다른 파트가 시리얼도 JSON도 몰라도 되게 만드는 것**이다.
+주행 링크만 양방향이다. 센서 브릿지가 멈추면 데이터가 비지만,
+주행 브릿지가 잘못 멈추면 차체가 마지막 명령대로 계속 굴러간다.
+그래서 명령 경로에 워치독이 두 겹으로 들어간다.
+
+**이 레포의 목적은 다른 파트가 시리얼도 프로토콜도 몰라도 되게 만드는 것**이다.
+이벤트 엔진은 `/sensors/env_snapshot`을, Nav2는 `/drive/odom`과 `/cmd_vel`을
+쓰면 되고, 어느 쪽도 USB 아래를 알 필요가 없다.
 
 관련 레포는 다음과 같이 나뉜다. 경계는 "어느 하드웨어에서 실행되는가"이다.
 
 | 레포 | 실행 위치 | 빌드 체계 |
 |---|---|---|
-| Pico 2 펌웨어 | Pico 2 | pico-sdk |
-| STM32 펌웨어 | STM32 | arm-none-eabi-gcc + Makefile |
+| `S2M-FW-SensorFusion` | Pico 2 | pico-sdk |
+| [`S2M-FW-DrivingControl`](https://github.com/Scout2Map/S2M-FW-DrivingControl) | STM32 | arm-none-eabi-gcc + Makefile |
 | **이 레포** | **RPi5** | **colcon (ROS2)** |
 
-주행 제어 MCU(STM32)용 브릿지 노드도 RPi5에서 도는 코드이므로 나중에 이 레포에 추가된다.
+두 MCU용 브릿지 노드가 모두 RPi5에서 돌기 때문에 이 레포에 함께 있다.
+펌웨어와 브릿지는 실행 하드웨어가 다르므로 레포를 나눈다.
 
 ---
 
@@ -42,8 +52,12 @@ scout2map-bridge/
 │   └── README.md         #   ★ 필드별 상세 레퍼런스
 └── scout2map_bridge/     # 브릿지 노드 본체
     ├── scout2map_bridge/
-    │   ├── pico_bridge_node.py
+    │   ├── pico_bridge_node.py   # 센서 퓨전 MCU (Pico 2)
+    │   ├── drive_bridge_node.py  # 주행 제어 MCU (STM32)
+    │   ├── drive_protocol.py     #   STM32 와이어 포맷
+    │   ├── serial_link.py        #   포트 개방/재연결 공용
     │   └── fake_sensor_node.py   # 하드웨어 없이 쓰는 가짜 퍼블리셔 (6절)
+    ├── PROTOCOL.md       #   ★ STM32 바이너리 프로토콜 명세
     ├── config/           #   파라미터 YAML
     ├── launch/
     ├── udev/             #   장치 경로 고정 규칙
@@ -159,24 +173,33 @@ source install/setup.bash
 
 ## 4. 장치 경로 고정 (권장)
 
-Pico 2는 `/dev/ttyACM0`으로 잡히지만, 다른 USB 시리얼 장치가 함께 물리면
-부팅 순서에 따라 번호가 뒤바뀐다. udev 규칙으로 고정 경로를 만들어 두면
-이 문제가 사라진다. 기본 설정값이 `/dev/scout2map_pico`인 것도 이 때문이다.
+**MCU가 둘이므로 이 단계는 사실상 필수다.** 두 보드 모두 `/dev/ttyACM*`으로
+잡히고 번호는 인식 순서를 따르므로, udev 규칙 없이는 부팅할 때마다
+센서와 주행이 자리를 바꿀 수 있다. 기본 설정값이 `/dev/scout2map_pico`와
+`/dev/scout2map_drive`인 것도 이 때문이다.
 
-먼저 Pico 2가 어떤 ID로 잡히는지 확인한다.
+먼저 각 보드가 어떤 ID로 잡히는지 확인한다.
 
 ```bash
 lsusb
 ```
 
-출력에서 `2e8a:000a` 같은 항목을 찾는다. `2e8a`는 Raspberry Pi의 벤더 ID이고,
-`000a`는 pico-sdk가 USB CDC에 쓰는 기본 제품 ID다.
-값이 다르면 `udev/99-scout2map-pico.rules` 파일 안의 ID를 실제 값으로 고친다.
+두 MCU를 모두 붙였다면 두 항목이 보여야 한다.
+
+| 장치 | VID:PID | 출처 |
+|---|---|---|
+| 센서 퓨전 MCU (Pico 2) | `2e8a:000a` | pico-sdk CDC 기본값 |
+| 주행 제어 MCU (STM32) | `0483:5740` | `usb_cdc.c`의 디스크립터, ST 가상 COM 포트 |
+
+값이 다르면 `udev/99-scout2map.rules` 안의 ID를 실제 값으로 고친다.
+
+브릿지가 엉뚱한 보드를 열면 `parse_errors`나 `crc_errors`만 올라가는데,
+증상이 배선 문제처럼 보여서 원인을 찾는 데 오래 걸린다.
 
 규칙을 설치하고 즉시 적용한다.
 
 ```bash
-sudo cp scout2map_bridge/udev/99-scout2map-pico.rules /etc/udev/rules.d/
+sudo cp scout2map_bridge/udev/99-scout2map.rules /etc/udev/rules.d/
 sudo udevadm control --reload-rules
 sudo udevadm trigger
 ```
@@ -184,10 +207,15 @@ sudo udevadm trigger
 Pico 2를 뽑았다 다시 꽂은 뒤 심볼릭 링크가 생겼는지 확인한다.
 
 ```bash
-ls -l /dev/scout2map_pico
+ls -l /dev/scout2map_*
 ```
 
-`/dev/scout2map_pico -> ttyACM0` 형태로 나오면 성공이다.
+다음처럼 두 심볼릭 링크가 각각 다른 ttyACM을 가리키면 성공이다.
+
+```
+/dev/scout2map_drive -> ttyACM1
+/dev/scout2map_pico  -> ttyACM0
+```
 
 마지막으로 시리얼 포트 접근 권한을 얻는다. **이 명령은 로그아웃 후 재로그인해야 적용된다.**
 
@@ -209,11 +237,21 @@ ros2 run scout2map_bridge pico_bridge --ros-args -p port:=/dev/ttyACM0
 
 Pico 2를 RPi5에 연결한 상태에서 실행한다.
 
+두 MCU를 모두 붙였다면 한 번에 띄운다.
+
 ```bash
-ros2 launch scout2map_bridge pico_bridge.launch.py
+ros2 launch scout2map_bridge bringup.launch.py
 ```
 
-정상이라면 콘솔에 다음 두 줄이 순서대로 나온다.
+한쪽만 붙어 있으면 해당 노드만 켠다.
+
+```bash
+ros2 launch scout2map_bridge bringup.launch.py drive:=false
+ros2 launch scout2map_bridge pico_bridge.launch.py    # 센서만, 개별 실행
+ros2 launch scout2map_bridge drive_bridge.launch.py   # 주행만, 개별 실행
+```
+
+센서 브릿지가 정상이라면 콘솔에 다음 두 줄이 순서대로 나온다.
 
 ```
 [INFO] [pico_bridge]: serial opened: /dev/scout2map_pico
@@ -232,6 +270,20 @@ MCU가 부팅 라인을 보내면 센서 초기화 결과도 함께 찍힌다.
 `serial open failed` 경고가 반복되면 아직 연결이 안 된 것이다.
 노드는 죽지 않고 1초 간격으로 계속 재시도하므로, 케이블을 다시 꽂으면 알아서 붙는다.
 
+주행 브릿지는 다음과 같이 나온다. `BOOT_INFO` 줄이 핵심이다.
+
+```
+[INFO] [drive_bridge]: serial opened: /dev/scout2map_drive
+[INFO] [drive_bridge]: drive_bridge up: port=/dev/scout2map_drive cmd=20Hz timeout=0.25s limits=0.20m/s 0.80rad/s
+[INFO] [drive_bridge]: MCU boot: fw 1.0.0, proto v1, 5764 counts/rev, track 240mm
+```
+
+`5764 counts/rev`가 나오면 펌웨어와 브릿지가 같은 구동계를 전제하고 있다는
+뜻이다. 이 값이 다르면 오도메트리 전체가 비례 오차를 갖는다.
+
+**주행 브릿지를 처음 띄울 때는 반드시 차체를 들어 바퀴를 띄운다.**
+브릿지 README 20절의 브링업 순서를 따른다.
+
 ### 동작 확인
 
 터미널을 새로 열고(여기서도 source가 필요하다) 데이터가 흐르는지 본다.
@@ -249,6 +301,7 @@ ros2 topic echo /bridge/status --once
 
 ```bash
 ros2 topic hz /sensors/env_snapshot
+ros2 topic echo /drive/status --once     # 주행부. link_ok와 estop_latched 확인
 ```
 
 실제 값을 눈으로 보려면 다음을 쓴다.
@@ -358,6 +411,20 @@ ros2 topic echo /sensors/env_snapshot
 | `/sensors/particulate` | `scout2map_msgs/Particulate` | ~1Hz |
 | `/bridge/status` | `scout2map_msgs/BridgeStatus` | 1Hz |
 | `/sensors/raw_json` | `std_msgs/String` | 옵션 |
+
+주행 제어 MCU(STM32) 쪽은 다음과 같다. 구독은 `/cmd_vel` 하나다.
+
+| 토픽 | 타입 | 주기 |
+|---|---|---|
+| `/drive/odom` | `nav_msgs/Odometry` | 50Hz |
+| `/drive/imu` | `sensor_msgs/Imu` | 50Hz |
+| `/drive/range` | `sensor_msgs/Range` | 50Hz |
+| `/drive/battery` | `sensor_msgs/BatteryState` | 50Hz |
+| `/drive/status` | `scout2map_msgs/DriveStatus` | 10Hz |
+| `/drive/diagnostics` | `scout2map_msgs/DriveDiagnostics` | 요청 시 |
+
+서비스는 `/drive/estop`, `/drive/clear_fault`, `/drive/reset_odom`,
+`/drive/request_diagnostics`이며 모두 `std_srvs/Trigger`다.
 
 **이벤트 엔진을 만든다면 `/sensors/env_snapshot` 하나만 구독하면 된다.**
 센서마다 발행 주기가 다르기 때문에 개별 토픽을 직접 조인하면

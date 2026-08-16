@@ -1,13 +1,24 @@
 # scout2map_bridge
 
-센서 퓨전 MCU(Raspberry Pi Pico 2)가 USB CDC로 내보내는 JSON 라인을 파싱해
-ROS2 토픽으로 재발행하는 브릿지 노드다.
+두 MCU를 ROS2에 연결하는 브릿지 노드들이다.
+
+| 노드 | 대상 | 방향 | 프레이밍 |
+|---|---|---|---|
+| `pico_bridge` | 센서 퓨전 MCU (Pico 2) | 수신 전용 | 개행 구분 JSON |
+| `drive_bridge` | 주행 제어 MCU (STM32) | **양방향** | 길이 접두 바이너리 + CRC16 |
+| `fake_sensors` | 없음 (합성 데이터) | - | - |
 
 이 문서는 **노드 자체를 다루거나 고치는 사람**을 위한 것이다.
 토픽에 어떤 값이 들어오는지 알고 싶을 뿐이라면
 [`scout2map_msgs/README.md`](../scout2map_msgs/README.md)를 본다.
+STM32 와이어 포맷은 [`PROTOCOL.md`](PROTOCOL.md)에 있다.
+
+두 노드가 시리얼 포트 개방과 재연결 로직을 `serial_link.py`로 공유한다.
+프레이밍은 공유하지 않는다. 두 MCU가 합의하지 않기 때문이다.
 
 ---
+
+# 1부. pico_bridge
 
 ## 1. MCU 입력 포맷
 
@@ -184,7 +195,7 @@ ros2 topic echo /sensors/raw_json
 
 ---
 
-## 9. 가짜 데이터 퍼블리셔
+## 9. 가짜 데이터 퍼블리셔 (fake_sensors)
 
 하드웨어 없이 구독자 측을 개발할 수 있도록 `fake_sensor_node.py`를 함께 둔다.
 브릿지와 동일한 토픽·타입·주기로 합성 값을 발행하며, 시나리오로 값의 흐름을 바꾼다.
@@ -197,3 +208,211 @@ ros2 topic echo /sensors/raw_json
 유효 수명 판정 기준(3초, 1초, 5초)이 이 노드에는 상수로 박혀 있다.
 브릿지 쪽 `stale_*` 파라미터의 기본값과 맞춰 둔 것이므로,
 기본값을 바꾸면 이 노드의 상수도 같이 옮긴다.
+
+---
+
+# 2부. drive_bridge
+
+STM32 주행 제어 MCU를 ROS2에 연결한다.
+와이어 포맷 상세는 [`PROTOCOL.md`](PROTOCOL.md)에 있고, 여기서는 노드 동작을 다룬다.
+
+## 10. pico_bridge와 무엇이 다른가
+
+| | `pico_bridge` | `drive_bridge` |
+|---|---|---|
+| 방향 | 수신 전용 | **양방향** |
+| 프레이밍 | 개행 구분 JSON | 길이 접두 바이너리 + CRC16 |
+| 유실 프레임 | 다음 주기에 자연 복구 | 동일하나 **명령은 워치독이 걸림** |
+| 실패 시 결과 | 센서값 결측 | **로봇이 계속 움직임** |
+
+마지막 행이 설계 전반을 좌우한다. 센서 브릿지가 멈추면 데이터가 비지만,
+주행 브릿지가 잘못 멈추면 차체가 마지막 명령대로 계속 굴러간다.
+
+## 11. 명령 경로와 두 겹의 워치독
+
+```
+/cmd_vel (Twist)
+   │  구독 콜백이 값만 캐시한다
+   ▼
+[캐시: linear, angular, 수신 시각]
+   │
+   ▼ 20Hz 타이머
+   ├── 최근 0.25초 안에 갱신됨 → 캐시값 전송
+   └── 그보다 오래됨          → 명시적 0 전송
+                                  │
+                                  ▼
+                          [STM32: 300ms 무명령 시 자체 정지]
+```
+
+**왜 캐시하고 반복 전송하는가.** MCU는 300ms 동안 명령이 없으면 모터를
+멈춘다. `/cmd_vel` 발행자가 5Hz로 도는 경우 프레임 하나만 유실돼도
+400ms 공백이 생겨 로봇이 덜컥거린다. 20Hz로 반복 전송하면 이 문제가 없다.
+
+**왜 브릿지가 먼저 0을 보내는가.** 반복 전송만 있으면 `/cmd_vel` 발행 노드가
+죽어도 브릿지가 마지막 명령을 영원히 되풀이한다. 그래서 브릿지 쪽에
+더 짧은 타임아웃(0.25초)을 두고, 만료되면 스스로 정지를 명령한다.
+
+**MCU의 300ms는 최후의 방어선이다.** 브릿지 자체가 죽거나 USB가 빠졌을 때를
+위한 것이지 정상 경로가 아니다. 정상 경로에서는 브릿지가 먼저 0을 보낸다.
+
+## 12. 발행 토픽
+
+| 토픽 | 타입 | 비고 |
+|---|---|---|
+| `/drive/odom` | `nav_msgs/Odometry` | `publish_tf`가 참이면 `odom`→`base_link` TF도 함께 |
+| `/drive/imu` | `sensor_msgs/Imu` | 각속도는 Z만 유효 |
+| `/drive/range` | `sensor_msgs/Range` | 센티널 처리 주의 |
+| `/drive/battery` | `sensor_msgs/BatteryState` | 미보고 시 `voltage=NaN` |
+| `/drive/status` | `scout2map_msgs/DriveStatus` | 10Hz |
+| `/drive/diagnostics` | `scout2map_msgs/DriveDiagnostics` | 요청 시에만 |
+
+구독은 `/cmd_vel` (`geometry_msgs/Twist`) 하나다.
+`linear.x`와 `angular.z`만 사용하며, 나머지 성분은 차동 구동 차체에서
+의미가 없으므로 무시한다.
+
+## 13. 서비스
+
+모두 `std_srvs/Trigger`다.
+
+```bash
+ros2 service call /drive/estop std_srvs/srv/Trigger
+ros2 service call /drive/clear_fault std_srvs/srv/Trigger
+ros2 service call /drive/reset_odom std_srvs/srv/Trigger
+ros2 service call /drive/request_diagnostics std_srvs/srv/Trigger
+```
+
+**E-stop은 래치된다.** 이후 속도 명령을 아무리 보내도 풀리지 않으며
+`clear_fault`를 명시적으로 호출해야 복귀한다. 브릿지도 e-stop 요청 시
+캐시된 명령을 0으로 지우므로, 복귀에는 의도적인 행동이 두 번 필요하다.
+
+## 14. 파라미터
+
+| 이름 | 기본값 | 설명 |
+|---|---|---|
+| `port` | `/dev/scout2map_drive` | udev 심볼릭 링크 |
+| `command_rate_hz` | `20.0` | 명령 반복 주기 |
+| `command_timeout_s` | `0.25` | 이보다 오래 `/cmd_vel`이 없으면 정지 명령 |
+| `max_linear_mps` | `0.20` | 정격 58RPM 기준. 무부하 76RPM 아님 |
+| `max_angular_radps` | `0.80` | 기구 한계 1.67보다 낮게. 스캔 품질 때문 |
+| `publish_tf` | `true` | `odom`→`base_link` 발행 여부 |
+| `odom_frame` / `base_frame` | `odom` / `base_link` | |
+| `imu_frame` / `range_frame` | `imu_link` / `range_link` | |
+| `link_timeout_s` | `0.5` | 텔레메트리가 50Hz이므로 넉넉한 값 |
+| `range_min_m` / `range_max_m` | `0.04` / `0.30` | 아날로그 IR 기준 |
+| `range_fov_rad` | `0.14` | |
+| `default_track_width_m` | `0.24` | `BOOT_INFO` 도착 전까지만 사용 |
+| `odom_xy_variance` | `0.001` | |
+| `odom_yaw_variance` | `0.01` | |
+| `odom_openloop_multiplier` | `100.0` | 개루프 시 공분산 배수 |
+
+`max_linear_mps`를 0.262(무부하 76RPM)로 올리면 안 된다. 실제로 도달할 수
+없는 값이라 제어기가 영구 포화 상태에 놓인다.
+
+VL53L0X로 교체한 경우 `range_min_m: 0.03`, `range_max_m: 1.20`으로 바꾼다.
+
+**`BOOT_INFO`가 파라미터를 덮어쓴다.** 트랙 폭은 펌웨어가 보고하는 값이
+우선이다. 펌웨어는 실제 빌드를 알고 파라미터는 추정값이기 때문이며,
+모터를 교체해도 브릿지가 자동으로 따라온다.
+
+## 15. TF를 누가 발행하는가
+
+기본값은 `drive_bridge`가 `odom`→`base_link`를 발행하는 것이다.
+`robot_localization` 등으로 IMU와 엔코더를 융합할 계획이라면
+`publish_tf: false`로 내리고 그쪽에 맡긴다.
+
+**두 노드가 같은 TF를 발행하면 프레임이 떨린다.** 증상이 SLAM 품질 저하로만
+나타나서 원인 찾기가 어려우므로, 융합 노드를 도입하는 시점에 반드시 끈다.
+
+## 16. 오도메트리 신뢰도
+
+펌웨어가 적분한 자세를 그대로 발행하고, 속도는 좌우 휠 속도에서 계산한다.
+공분산은 상태에 따라 달라진다.
+
+| 상태 | x/y 분산 | yaw 분산 |
+|---|---|---|
+| 정상 (폐루프) | 0.001 | 0.01 |
+| `OPENLOOP` | 0.1 | 1.0 |
+
+엔코더 신호가 끊기면 MCU가 개루프로 폴백하는데, 이때 오도메트리는 명령값
+기반 추정이라 사실상 믿을 수 없다. 공분산을 100배로 부풀려 하위 필터가
+스스로 알아내도록 방치하지 않는다.
+
+`Imu`의 방위 공분산도 마찬가지로 `IMU_CALIBRATED` 비트에 따라 달라진다.
+지자계 캘리브레이션 전에는 절대 방위가 드리프트하므로 yaw 분산을 1.0으로
+둔다. 상대적 자세 변화는 그 전에도 쓸 수 있다.
+
+## 17. 상태 변화 로깅
+
+주행부 폴트는 50Hz로 계속 올라오므로, 매 프레임 찍으면 콘솔이 못 쓰게 된다.
+브릿지는 **비트가 바뀌는 순간에만** 로그를 남긴다.
+
+```
+[ERROR] E-stop latched. Velocity commands are ignored until drive/clear_fault is called.
+[ERROR] stall fault: high duty with no motion. Check for a jammed wheel before clearing.
+[WARN]  encoder feedback lost, MCU fell back to open loop. Odometry is unreliable from here.
+[ERROR] battery below the cell damage point. The MCU has cut drive. Land the robot and charge.
+```
+
+## 18. 트러블슈팅
+
+```bash
+ros2 topic echo /drive/status --once
+```
+
+| 증상 | 원인과 조치 |
+|---|---|
+| `link_ok: false`, `port_open`도 false | 장치 경로 또는 권한. udev 규칙과 `dialout` 그룹 확인 |
+| `crc_errors`만 계속 증가 | 다른 장치를 열었을 가능성. Pico 2 포트를 잡았는지 확인 |
+| `frames_ok`는 느는데 `estop_latched: true` | E-stop 래치 상태. `clear_fault` 호출 |
+| 명령을 보내도 안 움직임 | `estop_latched`, `fault_stall`, `batt_dead` 순으로 확인 |
+| `cmd_timeout: true` 반복 | `/cmd_vel` 발행이 끊기고 있다. 발행 노드 확인 |
+| `openloop: true` | 엔코더 배선. 모터 전원선과 분리 포설했는지 확인 |
+| `proto_version` 불일치 경고 | 펌웨어와 브릿지 버전 차이. 한쪽을 갱신 |
+| `... frame is N bytes, this bridge expects M` | 페이로드 레이아웃 변경. `PROTOCOL.md` 2절 참조 |
+
+IMU가 의심되면 진단 프레임을 요청한다.
+
+```bash
+ros2 service call /drive/request_diagnostics std_srvs/srv/Trigger
+ros2 topic echo /drive/diagnostics --once
+```
+
+`imu_chip_id`가 0xA0이면 BNO055가 응답한 것이고, 0xFF면 전혀 응답이 없는
+것이다. `i2c_recoveries`가 계속 증가하면 슬레이브가 SDA를 잡고 있다.
+
+## 19. 검증 상태
+
+`drive_protocol.py`는 펌웨어 저장소의 `tools/s2m_console.py`와 CRC 구현,
+프레임 인코딩, 페이로드 포맷 문자열이 바이트 단위로 일치함을 확인했다.
+디코더는 단편화·손상·노이즈 시나리오에서 복구를 검증했다.
+
+**실물 STM32와의 통신은 아직 검증되지 않았다.** 위 확인은 두 호스트 측
+구현이 서로 일치한다는 것이지, 실제 보드에서 프레임이 흐르는 것을
+확인한 것이 아니다. 첫 브링업 시 20절 순서를 따른다.
+
+## 20. 첫 브링업 순서
+
+**차체를 들어 바퀴를 띄운 상태에서 시작한다.**
+
+1. 펌웨어 저장소의 `./tools/s2m_console.py --ping`으로 먼저 링크를 확인한다.
+   브릿지보다 이쪽이 문제 범위를 좁히기 쉽다.
+2. 브릿지를 띄우고 `BOOT_INFO` 로그가 5764 counts/rev를 보고하는지 본다.
+3. `ros2 topic echo /drive/status --once`로 `link_ok`와 `crc_errors`를 확인한다.
+4. 바퀴를 손으로 돌려 `/drive/odom`의 자세가 변하는지 본다.
+5. `ros2 topic pub`으로 아주 작은 속도를 명령하여 방향을 확인한다.
+6. 마지막으로 바닥에 내린다.
+
+```bash
+ros2 topic pub -r 10 /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.05}}"
+```
+
+## 21. 알려진 제약
+
+- **`CMD_WHEEL_RAW`를 노출하지 않는다.** PID를 우회하는 경로라 바닥에 놓인
+  상태로 실행하면 즉시 주행한다. 브링업용이므로 펌웨어 저장소의
+  `s2m_console.py --raw`를 쓰는 편이 안전하다.
+- **`pico_bridge`는 아직 `serial_link.py`를 쓰지 않는다.** 리더 로직이
+  자체 구현으로 남아 있다. 실물 검증이 끝난 노드를 재검증 수단 없이
+  건드리지 않기 위해 미뤘으며, 다음 하드웨어 세션에서 정리한다.
+- **배터리 잔량이 `NaN`이다.** 이 팩의 방전 곡선을 특성화한 적이 없다.
+  전압만으로 추정하면 모터 부하 아래에서 크게 틀린다.

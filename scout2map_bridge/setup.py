@@ -29,6 +29,7 @@ setup(
         "console_scripts": [
             "pico_bridge = scout2map_bridge.pico_bridge_node:main",
             "fake_sensors = scout2map_bridge.fake_sensor_node:main",
+            "drive_bridge = scout2map_bridge.drive_bridge_node:main",
         ],
     },
 )

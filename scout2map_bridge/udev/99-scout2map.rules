@@ -1,0 +1,13 @@
+# Stable device paths for the Scout2Map MCUs.
+# Both enumerate as /dev/ttyACM*, and the numbering follows plug order, so
+# without these rules the two boards swap places depending on boot timing.
+#
+# Verify the ID pairs with `lsusb` before installing.
+# Install: sudo cp 99-scout2map-pico.rules /etc/udev/rules.d/
+#          sudo udevadm control --reload-rules && sudo udevadm trigger
+
+# Sensor fusion MCU, Raspberry Pi Pico 2 (pico-sdk CDC default)
+SUBSYSTEM=="tty", ATTRS{idVendor}=="2e8a", ATTRS{idProduct}=="000a", SYMLINK+="scout2map_pico", MODE="0666"
+
+# Drive control MCU, STM32F103C8T6 (ST virtual COM port pair, set in usb_cdc.c)
+SUBSYSTEM=="tty", ATTRS{idVendor}=="0483", ATTRS{idProduct}=="5740", SYMLINK+="scout2map_drive", MODE="0666"
