@@ -11,7 +11,7 @@ RPi5에서 동작하며, ROS2 패키지 두 개로 구성된다.
 [ 환경 센서 ]                 [ 센서 퓨전 MCU ]        [ RPi5 / ROS2 ]
 AHT21   ─ I2C1 ┐
 ENS160  ─ I2C1 ┤
-BH1750  ─ I2C0 ┼──────────▶  Raspberry Pi Pico 2  ──▶  pico_bridge  ──▶  /sensors/*
+BH1750  ─ I2C0 ┼──────────▶  Raspberry Pi Pico 2  ──▶  sensor_bridge  ──▶  /sensors/*
 PMS7003 ─ UART ┘              (JSON per line)                                │
                                                                              ▼
 [ 구동계 ]                    [ 주행 제어 MCU ]                          이벤트 엔진
@@ -48,11 +48,11 @@ GP2D120X  ────┘                    ▲                   │
 ```
 scout2map-bridge/
 ├── scout2map_msgs/       # 메시지 타입 정의. 실행되는 노드는 없다
-│   ├── msg/              #   AirQuality, Particulate, EnvSnapshot, BridgeStatus
+│   ├── msg/              #   AirQuality, Particulate, EnvSnapshot, SensorStatus
 │   └── README.md         #   ★ 필드별 상세 레퍼런스
 └── scout2map_bridge/     # 브릿지 노드 본체
     ├── scout2map_bridge/
-    │   ├── pico_bridge_node.py   # 센서 퓨전 MCU (Pico 2)
+    │   ├── sensor_bridge_node.py   # 센서 퓨전 MCU (Pico 2)
     │   ├── drive_bridge_node.py  # 주행 제어 MCU (STM32)
     │   ├── drive_protocol.py     #   STM32 와이어 포맷
     │   ├── serial_link.py        #   포트 개방/재연결 공용
@@ -228,7 +228,7 @@ sudo usermod -aG dialout $USER
 udev 설정을 건너뛰고 싶다면 실행할 때 실제 경로를 넘겨도 된다.
 
 ```bash
-ros2 run scout2map_bridge pico_bridge --ros-args -p port:=/dev/ttyACM0
+ros2 run scout2map_bridge sensor_bridge --ros-args -p port:=/dev/ttyACM0
 ```
 
 ---
@@ -247,21 +247,21 @@ ros2 launch scout2map_bridge bringup.launch.py
 
 ```bash
 ros2 launch scout2map_bridge bringup.launch.py drive:=false
-ros2 launch scout2map_bridge pico_bridge.launch.py    # 센서만, 개별 실행
+ros2 launch scout2map_bridge sensor_bridge.launch.py    # 센서만, 개별 실행
 ros2 launch scout2map_bridge drive_bridge.launch.py   # 주행만, 개별 실행
 ```
 
 센서 브릿지가 정상이라면 콘솔에 다음 두 줄이 순서대로 나온다.
 
 ```
-[INFO] [pico_bridge]: serial opened: /dev/scout2map_pico
-[INFO] [pico_bridge]: pico_bridge up: port=/dev/scout2map_pico frame_id=sensor_fusion snapshot=5.0Hz
+[INFO] [sensor_bridge]: serial opened: /dev/scout2map_pico
+[INFO] [sensor_bridge]: sensor_bridge up: port=/dev/scout2map_pico frame_id=sensor_fusion snapshot=5.0Hz
 ```
 
 MCU가 부팅 라인을 보내면 센서 초기화 결과도 함께 찍힌다.
 
 ```
-[INFO] [pico_bridge]: MCU boot: aht21=ok, ens160=ok, bh1750=ok
+[INFO] [sensor_bridge]: MCU boot: aht21=ok, ens160=ok, bh1750=ok
 ```
 
 여기에 `FAIL`이 섞여 있으면 해당 센서의 배선이나 I2C 주소를 확인한다.
@@ -290,7 +290,7 @@ MCU가 부팅 라인을 보내면 센서 초기화 결과도 함께 찍힌다.
 
 ```bash
 source ~/scout2map_ws/install/setup.bash
-ros2 topic echo /bridge/status --once
+ros2 topic echo /sensors/status --once
 ```
 
 `link_ok: true`면 MCU와 정상적으로 통신 중이다.
@@ -330,9 +330,9 @@ ros2 launch scout2map_bridge fake_sensors.launch.py
 ```
 
 이 상태에서 7절의 모든 토픽이 실제 주기대로 발행된다.
-**진짜 브릿지와 토픽 이름이 같으므로 `pico_bridge`와 동시에 실행하면 안 된다.**
+**진짜 브릿지와 토픽 이름이 같으므로 `sensor_bridge`와 동시에 실행하면 안 된다.**
 값이 뒤섞여 원인을 알 수 없는 동작을 하게 된다.
-가짜 데이터임은 `/bridge/status`의 `port` 필드가 `SIMULATED`인 것으로 구분한다.
+가짜 데이터임은 `/sensors/status`의 `port` 필드가 `SIMULATED`인 것으로 구분한다.
 
 ### 시나리오
 
@@ -409,7 +409,7 @@ ros2 topic echo /sensors/env_snapshot
 | `/sensors/illuminance` | `sensor_msgs/Illuminance` | 5Hz |
 | `/sensors/air_quality` | `scout2map_msgs/AirQuality` | 1Hz |
 | `/sensors/particulate` | `scout2map_msgs/Particulate` | ~1Hz |
-| `/bridge/status` | `scout2map_msgs/BridgeStatus` | 1Hz |
+| `/sensors/status` | `scout2map_msgs/SensorStatus` | 1Hz |
 | `/sensors/raw_json` | `std_msgs/String` | 옵션 |
 
 주행 제어 MCU(STM32) 쪽은 다음과 같다. 구독은 `/cmd_vel` 하나다.
@@ -447,7 +447,45 @@ ros2 topic echo /sensors/env_snapshot
 
 ---
 
-## 9. 커밋하지 않는 것
+## 9. v1.0.0에서 올라올 때 (이름 변경)
+
+주행 브릿지가 들어오면서 이름 기준을 **역할 기반으로 통일했다.**
+기존에는 `pico_bridge`(보드 이름)와 `drive_bridge`(역할)가 섞여 있었다.
+보드 기준 이름은 하드웨어를 교체하면 거짓말이 되므로 역할 쪽으로 맞췄다.
+
+| v1.0.0 | 현재 |
+|---|---|
+| 실행 파일 `pico_bridge` | `sensor_bridge` |
+| 노드 이름 `/pico_bridge` | `/sensor_bridge` |
+| `pico_bridge.launch.py` | `sensor_bridge.launch.py` |
+| `config/pico_bridge.yaml` | `config/sensor_bridge.yaml` |
+| 토픽 `/bridge/status` | `/sensors/status` |
+| 메시지 `BridgeStatus` | `SensorStatus` |
+
+`/sensors/*`와 `/drive/*`로 네임스페이스가 갈리고,
+`SensorStatus`와 `DriveStatus`가 짝을 이룬다.
+
+**구독하는 쪽에서 고칠 것은 두 가지다.** 나머지 센서 토픽은 그대로다.
+
+```python
+# 이전
+from scout2map_msgs.msg import BridgeStatus
+self.create_subscription(BridgeStatus, '/bridge/status', cb, 10)
+
+# 현재
+from scout2map_msgs.msg import SensorStatus
+self.create_subscription(SensorStatus, '/sensors/status', cb, 10)
+```
+
+`/sensors/env_snapshot`을 비롯한 환경 센서 토픽은 이름도 필드도 바뀌지 않았다.
+이벤트 엔진이 스냅샷만 구독하고 있다면 고칠 것이 없다.
+
+`SensorStatus`에 `framing_overflows` 필드가 하나 추가되었다.
+개행 없이 바이트가 계속 쌓여 버퍼를 비운 횟수이며, 정상 동작 시 0이다.
+
+---
+
+## 10. 커밋하지 않는 것
 
 이 레포는 워크스페이스가 아니므로 `build/`, `install/`, `log/`가 여기에 생기지 않는다.
 그 디렉토리들은 워크스페이스 루트(`~/scout2map_ws/`)에 생기며, 그쪽에서 제외한다.

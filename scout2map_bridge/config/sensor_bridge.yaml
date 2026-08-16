@@ -1,4 +1,4 @@
-pico_bridge:
+sensor_bridge:
   ros__parameters:
     # Prefer the udev symlink so a replugged Pico keeps the same path
     port: "/dev/scout2map_pico"

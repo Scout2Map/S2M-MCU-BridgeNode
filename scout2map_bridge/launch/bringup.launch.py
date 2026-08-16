@@ -16,7 +16,7 @@ from launch_ros.actions import Node
 
 def generate_launch_description():
     pkg_share = get_package_share_directory("scout2map_bridge")
-    pico_params = os.path.join(pkg_share, "config", "pico_bridge.yaml")
+    sensor_params = os.path.join(pkg_share, "config", "sensor_bridge.yaml")
     drive_params = os.path.join(pkg_share, "config", "drive_bridge.yaml")
 
     args = [
@@ -27,7 +27,7 @@ def generate_launch_description():
             "drive", default_value="true",
             description="Start the STM32 drive control bridge"),
         DeclareLaunchArgument(
-            "pico_params_file", default_value=pico_params),
+            "sensor_params_file", default_value=sensor_params),
         DeclareLaunchArgument(
             "drive_params_file", default_value=drive_params),
     ]
@@ -35,11 +35,11 @@ def generate_launch_description():
     nodes = [
         Node(
             package="scout2map_bridge",
-            executable="pico_bridge",
-            name="pico_bridge",
+            executable="sensor_bridge",
+            name="sensor_bridge",
             output="screen",
             emulate_tty=True,
-            parameters=[LaunchConfiguration("pico_params_file")],
+            parameters=[LaunchConfiguration("sensor_params_file")],
             condition=IfCondition(LaunchConfiguration("sensors")),
         ),
         Node(

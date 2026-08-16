@@ -2,7 +2,7 @@
 #
 # File   : fake_sensor_node.py
 # Purpose: Publish synthetic sensor data on exactly the same topics and types
-#          as pico_bridge, so downstream nodes can be developed and tested
+#          as sensor_bridge, so downstream nodes can be developed and tested
 #          without the UGV hardware attached.
 # Author : jihoonkimtech
 #
@@ -27,7 +27,7 @@ from rcl_interfaces.msg import SetParametersResult
 
 from sensor_msgs.msg import Illuminance, RelativeHumidity, Temperature
 
-from scout2map_msgs.msg import AirQuality, BridgeStatus, EnvSnapshot, Particulate
+from scout2map_msgs.msg import AirQuality, SensorStatus, EnvSnapshot, Particulate
 
 # Scenario names accepted by the "scenario" parameter
 SCENARIOS = (
@@ -61,7 +61,7 @@ def _ramp(elapsed, duration, start, end):
 
 
 class FakeSensors(Node):
-    """Synthetic stand-in for pico_bridge. Publishes the same topic contract."""
+    """Synthetic stand-in for sensor_bridge. Publishes the same topic contract."""
 
     def __init__(self):
         super().__init__("fake_sensors")
@@ -109,7 +109,7 @@ class FakeSensors(Node):
         self._pub_snap = self.create_publisher(
             EnvSnapshot, "sensors/env_snapshot", sensor_qos)
         self._pub_status = self.create_publisher(
-            BridgeStatus, "bridge/status", status_qos)
+            SensorStatus, "sensors/status", status_qos)
 
         # Same latest-value cache shape as the real bridge
         self._cache = {"aht21": None, "bh1750": None,
@@ -355,7 +355,7 @@ class FakeSensors(Node):
     def _tick_status(self):
         now = time.monotonic()
         link_up = (self._scenario != "link_loss")
-        msg = BridgeStatus()
+        msg = SensorStatus()
         msg.header.stamp = self._stamp()
         msg.header.frame_id = self._frame_id
         msg.port = "SIMULATED"          # obvious marker that this is not real
@@ -367,6 +367,7 @@ class FakeSensors(Node):
         msg.lines_received = self._lines
         msg.parse_errors = 0
         msg.unknown_src = 0
+        msg.framing_overflows = 0
         msg.aht21_present = True
         msg.ens160_present = True
         msg.bh1750_present = True

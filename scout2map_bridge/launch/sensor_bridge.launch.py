@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# File   : pico_bridge.launch.py
+# File   : sensor_bridge.launch.py
 # Purpose: Launch the Pico 2 serial bridge with the shared YAML parameters.
 
 import os
@@ -13,16 +13,16 @@ from launch_ros.actions import Node
 
 def generate_launch_description():
     pkg_share = get_package_share_directory("scout2map_bridge")
-    default_params = os.path.join(pkg_share, "config", "pico_bridge.yaml")
+    default_params = os.path.join(pkg_share, "config", "sensor_bridge.yaml")
 
     params_arg = DeclareLaunchArgument(
         "params_file", default_value=default_params,
-        description="YAML file with pico_bridge parameters")
+        description="YAML file with sensor_bridge parameters")
 
     bridge = Node(
         package="scout2map_bridge",
-        executable="pico_bridge",
-        name="pico_bridge",
+        executable="sensor_bridge",
+        name="sensor_bridge",
         output="screen",
         emulate_tty=True,
         parameters=[LaunchConfiguration("params_file")],

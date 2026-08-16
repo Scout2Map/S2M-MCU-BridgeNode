@@ -184,9 +184,9 @@ PMS7003은 한 프레임에 CF=1 표준입자 기준값과 대기환경 기준�
 
 ---
 
-## 6. `BridgeStatus` - 링크 및 노드 상태
+## 6. `SensorStatus` - 링크 및 노드 상태
 
-토픽 `/bridge/status`, 1Hz.
+토픽 `/sensors/status`, 1Hz.
 QoS가 TRANSIENT_LOCAL이므로 나중에 뜬 노드도 마지막 상태를 즉시 받는다.
 
 | 필드 | 타입 | 설명 |

@@ -2,23 +2,33 @@
 
 두 MCU를 ROS2에 연결하는 브릿지 노드들이다.
 
-| 노드 | 대상 | 방향 | 프레이밍 |
-|---|---|---|---|
-| `pico_bridge` | 센서 퓨전 MCU (Pico 2) | 수신 전용 | 개행 구분 JSON |
-| `drive_bridge` | 주행 제어 MCU (STM32) | **양방향** | 길이 접두 바이너리 + CRC16 |
-| `fake_sensors` | 없음 (합성 데이터) | - | - |
+| 노드 | 대상 | 방향 | 프레이밍 | 네임스페이스 |
+|---|---|---|---|---|
+| `sensor_bridge` | 센서 퓨전 MCU (Pico 2) | 수신 전용 | 개행 구분 JSON | `/sensors/*` |
+| `drive_bridge` | 주행 제어 MCU (STM32) | **양방향** | 길이 접두 바이너리 + CRC16 | `/drive/*` |
+| `fake_sensors` | 없음 (합성 데이터) | - | - | `/sensors/*` |
 
 이 문서는 **노드 자체를 다루거나 고치는 사람**을 위한 것이다.
 토픽에 어떤 값이 들어오는지 알고 싶을 뿐이라면
 [`scout2map_msgs/README.md`](../scout2map_msgs/README.md)를 본다.
 STM32 와이어 포맷은 [`PROTOCOL.md`](PROTOCOL.md)에 있다.
 
-두 노드가 시리얼 포트 개방과 재연결 로직을 `serial_link.py`로 공유한다.
-프레이밍은 공유하지 않는다. 두 MCU가 합의하지 않기 때문이다.
+두 노드가 `serial_link.py`의 `SerialLink`를 공유한다. 포트 개방, 재연결,
+리더 스레드 관리가 여기에 있고, **프레이밍은 공유하지 않는다.**
+두 MCU가 합의하지 않기 때문이다.
+
+```
+SerialLink  (포트 소유, 원시 바이트)
+   ├── LineFramer      -> sensor_bridge   개행 분할
+   └── FrameDecoder    -> drive_bridge    SOF 탐색 + 길이 + CRC16
+```
+
+`LineFramer`도 `serial_link.py`에 있고, `FrameDecoder`는 프로토콜에
+종속적이므로 `drive_protocol.py`에 있다.
 
 ---
 
-# 1부. pico_bridge
+# 1부. sensor_bridge
 
 ## 1. MCU 입력 포맷
 
@@ -41,8 +51,8 @@ Pico 2 펌웨어는 JSON 객체 한 개를 한 줄로 내보낸다. `src` 필드
 ## 2. 노드 구조
 
 ```
-[USB CDC] ──▶ SerialReader (별도 스레드)
-                   │  \n 단위로 잘라 (수신시각, 라인) 튜플 생성
+[USB CDC] ──▶ SerialLink (별도 스레드, 원시 바이트)
+                   │  LineFramer가 \n 단위로 잘라 (수신시각, 라인) 생성
                    ▼
               deque (maxlen 512)
                    │
@@ -90,14 +100,14 @@ deque가 가득 차면 **가장 오래된 라인부터 버린다.** ROS 측이 �
 `stale_*` 값은 각 센서의 발행 주기보다 넉넉히 크게 잡아야 한다.
 1Hz 센서에 1.0초를 주면 지터 한 번에 `valid` 플래그가 깜빡거린다.
 
-값은 `config/pico_bridge.yaml`에서 수정하는 것이 기본이다.
+값은 `config/sensor_bridge.yaml`에서 수정하는 것이 기본이다.
 런치 파일이 이 YAML을 읽어 노드에 넘긴다.
 
 일회성으로 바꿔 볼 때는 `ros2 run`에 직접 넘긴다.
 다만 이 경우 YAML은 읽히지 않으므로, 명시하지 않은 값은 코드의 기본값이 쓰인다.
 
 ```bash
-ros2 run scout2map_bridge pico_bridge --ros-args \
+ros2 run scout2map_bridge sensor_bridge --ros-args \
   -p port:=/dev/ttyACM0 \
   -p publish_raw_json:=true
 ```
@@ -105,8 +115,8 @@ ros2 run scout2map_bridge pico_bridge --ros-args \
 현재 적용된 값은 실행 중에 조회할 수 있다.
 
 ```bash
-ros2 param list /pico_bridge
-ros2 param get /pico_bridge stale_air_quality_s
+ros2 param list /sensor_bridge
+ros2 param get /sensor_bridge stale_air_quality_s
 ```
 
 설치와 빌드 절차는 [레포 루트 README](../README.md)에 있다.
@@ -118,13 +128,13 @@ ros2 param get /pico_bridge stale_air_quality_s
 | 토픽 | 신뢰성 | 내구성 | depth |
 |---|---|---|---|
 | `/sensors/*` | RELIABLE | VOLATILE | 10 |
-| `/bridge/status` | RELIABLE | TRANSIENT_LOCAL | 1 |
+| `/sensors/status` | RELIABLE | TRANSIENT_LOCAL | 1 |
 
 센서 데이터에는 BEST_EFFORT를 쓰는 관례가 있지만 여기서는 RELIABLE을 택했다.
 데이터 레이트가 초당 수 건 수준이라 신뢰성 전송 비용이 사실상 없고,
 **이벤트 엔진이 임계값 돌파 순간의 샘플을 조용히 놓치는 쪽이 훨씬 위험**하기 때문이다.
 
-`/bridge/status`만 TRANSIENT_LOCAL이라 나중에 뜬 노드도 마지막 상태를 즉시 받는다.
+`/sensors/status`만 TRANSIENT_LOCAL이라 나중에 뜬 노드도 마지막 상태를 즉시 받는다.
 
 ---
 
@@ -148,7 +158,7 @@ ros2 param get /pico_bridge stale_air_quality_s
 먼저 상태부터 본다.
 
 ```bash
-ros2 topic echo /bridge/status --once
+ros2 topic echo /sensors/status --once
 ```
 
 | 증상 | 원인과 조치 |
@@ -164,7 +174,7 @@ ros2 topic echo /bridge/status --once
 원본 라인을 직접 보는 것이 가장 빠른 진단이다.
 
 ```bash
-ros2 run scout2map_bridge pico_bridge --ros-args -p publish_raw_json:=true
+ros2 run scout2map_bridge sensor_bridge --ros-args -p publish_raw_json:=true
 ros2 topic echo /sensors/raw_json
 ```
 
@@ -186,8 +196,8 @@ ros2 topic echo /sensors/raw_json
 ## 8. 알려진 제약
 
 - **역방향 통신이 없다.** 현재 Pico 2 펌웨어는 수신 명령을 처리하지 않으므로
-  브릿지에도 송신 경로를 두지 않았다. 캘리브레이션 명령 등이 필요해지면
-  `SerialReader`에 write 경로를 추가하고 펌웨어에 파서를 넣어야 한다.
+  이 노드는 송신하지 않는다. `SerialLink.write()`는 이미 있으므로
+  (주행 브릿지가 쓴다) 필요해지면 펌웨어에 파서를 넣는 쪽이 작업량이다.
 - **`SerialReader`가 이 파일 안에 있다.** 포트 개방·재연결 로직 자체는 범용이지만
   아직 공용 모듈로 분리하지 않았다. STM32 브릿지는 프레이밍 방식이 다르므로
   (개행 분할이 아니라 SOF 탐색 + CRC16 검증) 그때 함께 정리한다.
@@ -216,9 +226,9 @@ ros2 topic echo /sensors/raw_json
 STM32 주행 제어 MCU를 ROS2에 연결한다.
 와이어 포맷 상세는 [`PROTOCOL.md`](PROTOCOL.md)에 있고, 여기서는 노드 동작을 다룬다.
 
-## 10. pico_bridge와 무엇이 다른가
+## 10. sensor_bridge와 무엇이 다른가
 
-| | `pico_bridge` | `drive_bridge` |
+| | `sensor_bridge` | `drive_bridge` |
 |---|---|---|
 | 방향 | 수신 전용 | **양방향** |
 | 프레이밍 | 개행 구분 JSON | 길이 접두 바이너리 + CRC16 |
@@ -411,7 +421,7 @@ ros2 topic pub -r 10 /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.05}}"
 - **`CMD_WHEEL_RAW`를 노출하지 않는다.** PID를 우회하는 경로라 바닥에 놓인
   상태로 실행하면 즉시 주행한다. 브링업용이므로 펌웨어 저장소의
   `s2m_console.py --raw`를 쓰는 편이 안전하다.
-- **`pico_bridge`는 아직 `serial_link.py`를 쓰지 않는다.** 리더 로직이
+- **`sensor_bridge`는 아직 `serial_link.py`를 쓰지 않는다.** 리더 로직이
   자체 구현으로 남아 있다. 실물 검증이 끝난 노드를 재검증 수단 없이
   건드리지 않기 위해 미뤘으며, 다음 하드웨어 세션에서 정리한다.
 - **배터리 잔량이 `NaN`이다.** 이 팩의 방전 곡선을 특성화한 적이 없다.

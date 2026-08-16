@@ -13,6 +13,7 @@ uint32  mcu_reboot_count    # incremented whenever uptime jumps backwards
 uint64  lines_received
 uint64  parse_errors        # lines that were not valid JSON
 uint64  unknown_src         # valid JSON but an unrecognised "src" field
+uint64  framing_overflows   # runaway bytes with no newline, buffer was reset
 
 # Sensor presence as reported by the MCU boot line.
 # pms7003 has no init handshake, so it is inferred from received frames.

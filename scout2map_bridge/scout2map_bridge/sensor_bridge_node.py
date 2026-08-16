@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 #
-# File   : pico_bridge_node.py
+# File   : sensor_bridge_node.py
 # Purpose: Bridge the Scout2Map sensor-fusion MCU (Raspberry Pi Pico 2) to ROS 2.
 #          Reads JSON-per-line frames over USB CDC, republishes them as typed
 #          topics, and keeps a latest-value cache that is published at a fixed
@@ -16,12 +16,10 @@
 #   {"src":"sys","uptime_ms":123456}
 
 import json
-import threading
 import time
 from collections import deque
 
 import rclpy
-import serial
 from rclpy.node import Node
 from rclpy.qos import (
     DurabilityPolicy,
@@ -33,110 +31,18 @@ from rclpy.qos import (
 from sensor_msgs.msg import Illuminance, RelativeHumidity, Temperature
 from std_msgs.msg import String
 
-from scout2map_msgs.msg import AirQuality, BridgeStatus, EnvSnapshot, Particulate
+from scout2map_msgs.msg import AirQuality, EnvSnapshot, Particulate, SensorStatus
+
+from .serial_link import LineFramer, SerialLink
 
 # Drop the oldest lines rather than growing without bound if ROS stalls.
 RX_QUEUE_MAX = 512
 
-# A line longer than this means the stream is desynchronised, so throw it away.
-RX_LINE_MAX = 4096
-
-# Serial reopen back-off after a failure.
-REOPEN_DELAY_S = 1.0
-
-
-class SerialReader(threading.Thread):
-    """Owns the serial port and pushes (mono_time, line) tuples into a sink."""
-
-    def __init__(self, port, baudrate, sink, logger):
-        super().__init__(daemon=True)
-        self._port_name = port
-        self._baudrate = baudrate
-        self._sink = sink
-        self._log = logger
-        self._ser = None
-        self._stop = threading.Event()
-        self._open_flag = threading.Event()
-
-    @property
-    def is_open(self):
-        return self._open_flag.is_set()
-
-    def stop(self):
-        self._stop.set()
-        self._close()
-
-    def run(self):
-        buf = bytearray()
-        while not self._stop.is_set():
-            if self._ser is None:
-                buf.clear()
-                if not self._try_open():
-                    self._stop.wait(REOPEN_DELAY_S)
-                continue
-
-            try:
-                # Blocking read with a timeout keeps the thread responsive
-                chunk = self._ser.read(256)
-            except (serial.SerialException, OSError) as exc:
-                self._close(f"read failed: {exc}")
-                continue
-
-            if not chunk:
-                continue
-
-            buf.extend(chunk)
-
-            # A frame with no terminator is unusable, so reset the buffer
-            if len(buf) > RX_LINE_MAX and b"\n" not in buf:
-                self._log.warn("rx buffer overflow without newline, flushing")
-                buf.clear()
-                continue
-
-            while b"\n" in buf:
-                raw, _, rest = buf.partition(b"\n")
-                buf = bytearray(rest)
-                line = raw.decode("utf-8", errors="replace").strip()
-                if line:
-                    self._sink((time.monotonic(), line))
-
-    def _try_open(self):
-        try:
-            self._ser = serial.Serial(
-                port=self._port_name,
-                baudrate=self._baudrate,
-                timeout=0.1,
-                exclusive=True,
-            )
-            # USB CDC ignores the line coding, but DTR must be asserted
-            self._ser.dtr = True
-            self._ser.reset_input_buffer()
-            self._open_flag.set()
-            self._log.info(f"serial opened: {self._port_name}")
-            return True
-        except (serial.SerialException, OSError) as exc:
-            self._ser = None
-            self._open_flag.clear()
-            self._log.warn(f"serial open failed ({self._port_name}): {exc}")
-            return False
-
-    def _close(self, reason=None):
-        if self._ser is not None:
-            try:
-                self._ser.close()
-            except Exception:
-                pass
-        self._ser = None
-        self._open_flag.clear()
-        if reason:
-            self._log.warn(f"serial closed: {reason}")
-
-
-class PicoBridge(Node):
+class SensorBridge(Node):
     """Serial-to-topic bridge for the Pico 2 sensor fusion MCU."""
 
     def __init__(self):
-        super().__init__("pico_bridge")
+        super().__init__("sensor_bridge")
 
         # ---------------- Parameters ----------------
         self.declare_parameter("port", "/dev/ttyACM0")
@@ -193,7 +99,7 @@ class PicoBridge(Node):
         self._pub_snap = self.create_publisher(
             EnvSnapshot, "sensors/env_snapshot", sensor_qos)
         self._pub_status = self.create_publisher(
-            BridgeStatus, "bridge/status", status_qos)
+            SensorStatus, "sensors/status", status_qos)
         self._pub_rawjson = None
         if self._publish_raw:
             self._pub_rawjson = self.create_publisher(
@@ -220,9 +126,10 @@ class PicoBridge(Node):
 
         # ---------------- Serial reader ----------------
         self._rx = deque(maxlen=RX_QUEUE_MAX)
-        self._reader = SerialReader(
-            self._port, self._baudrate, self._rx.append, self.get_logger())
-        self._reader.start()
+        self._framer = LineFramer()
+        self._link = SerialLink(
+            self._port, self._baudrate, self._on_serial_bytes, self.get_logger())
+        self._link.start()
 
         # ---------------- Timers ----------------
         # Drain fast so per-sensor topics stay close to the MCU timing
@@ -233,12 +140,16 @@ class PicoBridge(Node):
         self.create_timer(1.0 / status_hz, self._publish_status)
 
         self.get_logger().info(
-            f"pico_bridge up: port={self._port} frame_id={self._frame_id} "
+            f"sensor_bridge up: port={self._port} frame_id={self._frame_id} "
             f"snapshot={snap_hz:.1f}Hz")
 
     # ------------------------------------------------------------------
     # RX path
     # ------------------------------------------------------------------
+    def _on_serial_bytes(self, data: bytes):
+        """Runs on the reader thread. Split into lines here, publish on the timer."""
+        self._rx.extend(self._framer.feed(data))
+
     def _drain_rx(self):
         # Bound the work per callback so one burst cannot stall the executor
         for _ in range(RX_QUEUE_MAX):
@@ -444,11 +355,11 @@ class PicoBridge(Node):
 
     def _publish_status(self):
         now = time.monotonic()
-        msg = BridgeStatus()
+        msg = SensorStatus()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = self._frame_id
         msg.port = self._port
-        msg.port_open = self._reader.is_open
+        msg.port_open = self._link.is_open
         msg.link_ok = self._link_ok(now)
         msg.last_line_age_s = (
             float(now - self._last_line_mono) if self._last_line_mono else -1.0)
@@ -457,6 +368,7 @@ class PicoBridge(Node):
         msg.lines_received = self._lines_rx
         msg.parse_errors = self._parse_errors
         msg.unknown_src = self._unknown_src
+        msg.framing_overflows = self._framer.overflows
         msg.aht21_present = self._present["aht21"]
         msg.ens160_present = self._present["ens160"]
         msg.bh1750_present = self._present["bh1750"]
@@ -464,12 +376,12 @@ class PicoBridge(Node):
         self._pub_status.publish(msg)
 
     def _link_ok(self, now):
-        if not self._reader.is_open or self._last_line_mono == 0.0:
+        if not self._link.is_open or self._last_line_mono == 0.0:
             return False
         return (now - self._last_line_mono) <= self._link_timeout
 
     def destroy_node(self):
-        self._reader.stop()
+        self._link.stop()
         return super().destroy_node()
 
 
@@ -508,7 +420,7 @@ def _clamp_u32(value):
 
 def main(args=None):
     rclpy.init(args=args)
-    node = PicoBridge()
+    node = SensorBridge()
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
