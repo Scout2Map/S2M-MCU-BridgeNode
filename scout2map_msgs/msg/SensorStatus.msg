@@ -15,8 +15,13 @@ uint64  parse_errors        # lines that were not valid JSON
 uint64  unknown_src         # valid JSON but an unrecognised "src" field
 uint64  framing_overflows   # runaway bytes with no newline, buffer was reset
 
-# Sensor presence as reported by the MCU boot line.
-# pms7003 has no init handshake, so it is inferred from received frames.
+# Sensor presence. Seeded from the MCU boot line, then confirmed by data:
+# any sensor that delivers a reading is marked present even if the boot line
+# was missed, which happens whenever this node attaches to an MCU that is
+# already running. A boot line resets all four flags.
+#
+# These say a sensor is talking, not that its reading is usable. Use the
+# matching *_valid fields in EnvSnapshot for that.
 bool    aht21_present
 bool    ens160_present
 bool    bh1750_present

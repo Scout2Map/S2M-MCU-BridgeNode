@@ -100,10 +100,12 @@ class SensorBridge(Node):
             EnvSnapshot, "sensors/env_snapshot", sensor_qos)
         self._pub_status = self.create_publisher(
             SensorStatus, "sensors/status", status_qos)
-        self._pub_rawjson = None
-        if self._publish_raw:
-            self._pub_rawjson = self.create_publisher(
-                String, "sensors/raw_json", sensor_qos)
+        # Created unconditionally so publish_raw_json can be flipped while the
+        # node runs. An idle publisher with no subscriber costs almost nothing,
+        # and a `param set` that reports success while doing nothing is worse
+        # than the topic simply existing.
+        self._pub_rawjson = self.create_publisher(
+            String, "sensors/raw_json", sensor_qos)
 
         # ---------------- Latest-value cache ----------------
         # Each entry is (payload_dict, monotonic_stamp) or None when never seen.
@@ -163,7 +165,7 @@ class SensorBridge(Node):
         self._lines_rx += 1
         self._last_line_mono = mono
 
-        if self._pub_rawjson is not None:
+        if self.get_parameter("publish_raw_json").value:
             self._pub_rawjson.publish(String(data=line))
 
         try:
@@ -181,6 +183,13 @@ class SensorBridge(Node):
 
         src = obj.get("src")
         stamp = self.get_clock().now().to_msg()
+
+        # Presence is proven by data, not only by the boot banner. The banner
+        # is sent once; if this node starts after the MCU, or reconnects to an
+        # MCU that is already running, that line is never seen and every
+        # sensor would be reported absent while its readings arrive normally.
+        if src in self._present:
+            self._present[src] = True
 
         if src == "bh1750":
             self._on_bh1750(obj, mono, stamp)
@@ -278,8 +287,10 @@ class SensorBridge(Node):
 
     def _on_sys(self, obj):
         if obj.get("event") == "boot":
+            # A fresh boot invalidates what we knew, so reset first
             for key in self._present:
                 self._present[key] = bool(obj.get(key, False))
+            self._pms_seen = False
             self.get_logger().info(
                 "MCU boot: "
                 + ", ".join(f"{k}={'ok' if v else 'FAIL'}"
