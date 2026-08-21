@@ -33,10 +33,12 @@ from scout2map_msgs.msg import DriveStatus
 class SkidCalib(Node):
     """Integrates both yaw estimates and reports their ratio."""
 
-    def __init__(self, min_rate, settle_s):
+    def __init__(self, min_rate, settle_s, min_calib_gyro=2):
         super().__init__("skid_calib")
         self._min_rate = min_rate
         self._settle_s = settle_s
+        self._min_calib_gyro = min_calib_gyro
+        self._gyro_ready = False
 
         self._enc_angle = 0.0       # integrated encoder yaw, radians
         self._imu_angle = 0.0       # integrated IMU yaw, radians
@@ -49,7 +51,8 @@ class SkidCalib(Node):
         self.create_subscription(DriveStatus, "drive/status", self._on_status, 50)
         self.create_timer(1.0, self._report)
 
-        print("skid_calib: measure the effective track width of the chassis")
+        # The file header is written as # comments, so __doc__ is None here.
+        print("skid_calib: measure the skid steer track width correction")
         print()
         print("Rotate the robot in place, both directions, for 20-30 seconds.")
         print("Use teleop or a steady angular command. Keep it on the surface")
@@ -64,12 +67,22 @@ class SkidCalib(Node):
                 self._warned_openloop = True
                 print("  [warn] encoders unavailable, samples are being ignored")
             return
-        if not msg.imu_calibrated:
+        # Only the gyro matters here. imu_calibrated also requires the
+        # magnetometer, which fixes absolute heading and has no bearing on a
+        # ratio of two yaw RATES. Waiting for it blocks the measurement for no
+        # gain, and the accelerometer never settles on a chassis that is
+        # sitting still between runs.
+        if msg.calib_gyro < self._min_calib_gyro:
             if not self._warned_calib:
                 self._warned_calib = True
-                print("  [warn] IMU not calibrated yet. Move the chassis in a "
-                      "figure eight until calib_mag reaches 3.")
+                print(f"  [warn] gyro calibration is {msg.calib_gyro}, need "
+                      f"{self._min_calib_gyro}. Leave the chassis still for a "
+                      "few seconds; the BNO055 calibrates its gyro at rest.")
             return
+
+        if not self._gyro_ready:
+            self._gyro_ready = True
+            print(f"  gyro calibration {msg.calib_gyro}/3, collecting samples")
 
         stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
         if self._last_stamp is None:
@@ -159,10 +172,12 @@ def main():
                     help="ignore samples below this yaw rate, rad/s")
     ap.add_argument("--settle", type=float, default=0.0,
                     help="seconds to discard at the start")
+    ap.add_argument("--min-calib-gyro", type=int, default=2, choices=[0, 1, 2, 3],
+                    help="required BNO055 gyro calibration level (default 2)")
     args, ros_args = ap.parse_known_args()
 
     rclpy.init(args=ros_args)
-    node = SkidCalib(args.min_rate, args.settle)
+    node = SkidCalib(args.min_rate, args.settle, args.min_calib_gyro)
     rc = 0
     try:
         rclpy.spin(node)
