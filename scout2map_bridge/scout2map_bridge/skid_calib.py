@@ -49,7 +49,7 @@ class SkidCalib(Node):
         self.create_subscription(DriveStatus, "drive/status", self._on_status, 50)
         self.create_timer(1.0, self._report)
 
-        print(__doc__.split("Why this is needed")[0].strip())
+        print("skid_calib: measure the effective track width of the chassis")
         print()
         print("Rotate the robot in place, both directions, for 20-30 seconds.")
         print("Use teleop or a steady angular command. Keep it on the surface")
