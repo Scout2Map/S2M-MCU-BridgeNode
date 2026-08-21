@@ -56,14 +56,27 @@ drive_bridge:
     # predicts. skid_factor corrects for that; it is a property of the tyres
     # and the floor, not something derivable on paper.
     #
-    # 1.0 is the UNMEASURED default and will make every deliberate turn read
-    # as slip. Measure before trusting slip_ratio:
+    # Measured 2026-08-21 on the assembled chassis, indoor hard floor:
+    #   clockwise      1.471  (509 samples, 1739 deg encoder / 1183 deg IMU)
+    #   anticlockwise  1.344  (585 samples, 1999 deg encoder / 1487 deg IMU)
+    # The 9 percent split between directions is real and repeatable, so this
+    # is their mean rather than either reading. Gyro bias was measured at
+    # -0.031 deg/s and is far too small to explain it; the cause is more
+    # likely left/right asymmetry in motors, loading or tyre contact.
+    #
+    # Re-measure after changing tyres, load or driving surface:
     #   ros2 run scout2map_bridge skid_calib
-    skid_factor: 1.0
+    skid_factor: 1.41
 
-    # BNO055 reads 1-2 deg/s at rest before its gyro calibrates, which the
-    # slip signal would read as real rotation. Measure with the firmware
-    # repository's s2m_imu_view.py --bias and enter the value in rad/s.
+    # A drifting gyro reads as real rotation to the slip detector. Measured
+    # 2026-08-21 with s2m_imu_view.py --bias, twice, ~500 samples each:
+    #   run 1  -0.031 deg/s   noise sd 0.087
+    #   run 2  +0.001 deg/s   noise sd 0.089
+    # The sign flips between runs, so this is noise rather than a real
+    # offset: the BNO055 re-zeros its own gyro whenever it detects rest.
+    # Both readings sit well under the noise floor, so correcting would add
+    # error rather than remove it. Zero here is a measured result, not a
+    # default.
     gyro_bias_radps: 0.0
 
     # Below these the comparison is noise dividing into noise
