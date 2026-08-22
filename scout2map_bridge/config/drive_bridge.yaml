@@ -70,14 +70,38 @@ drive_bridge:
 
     # A drifting gyro reads as real rotation to the slip detector. Measured
     # 2026-08-21 with s2m_imu_view.py --bias, twice, ~500 samples each:
-    #   run 1  -0.031 deg/s   noise sd 0.087
-    #   run 2  +0.001 deg/s   noise sd 0.089
-    # The sign flips between runs, so this is noise rather than a real
-    # offset: the BNO055 re-zeros its own gyro whenever it detects rest.
-    # Both readings sit well under the noise floor, so correcting would add
-    # error rather than remove it. Zero here is a measured result, not a
-    # default.
+    #   run 1  -0.031 deg/s   noise sd 0.087   drift -1.8 deg/min
+    #   run 2  +0.001 deg/s   noise sd 0.089   drift +0.1 deg/min
+    # The sign flips between runs, so this is noise rather than a real offset:
+    # the BNO055 re-zeros its own gyro whenever it detects rest. Both readings
+    # sit well under the noise floor, so correcting would add error rather
+    # than remove it. Zero here is a measured result, not an unset default.
+    #
+    # Re-measure if the BNO055 is replaced or remounted. Stop the bridge
+    # first, the tool opens the serial port directly:
+    #   python3 tools/s2m_imu_view.py --bias -p /dev/scout2map_drive
     gyro_bias_radps: 0.0
+
+    # --- Battery ---
+    # 3S 5250mAh LiPo. There is no current shunt on this board, so state of
+    # charge is interpolated from pack voltage against the curve below. It is
+    # a gauge, not a fuel meter: voltage sags under motor load, so the reading
+    # runs pessimistic while driving and recovers seconds after stopping.
+    battery_cells: 3
+    battery_capacity_ah: 5.25
+    battery_estimate_soc: true
+
+    # Seconds. Without smoothing the estimate swings tens of percent every
+    # time the motors start and stop.
+    battery_smoothing_s: 10.0
+
+    # Per-cell volts, descending, paired index-wise with battery_curve_soc.
+    # Points bunch up near 3.7V because that is where the LiPo knee is; a
+    # coarse table there reads badly wrong.
+    battery_curve_cell_v: [4.20, 4.10, 4.00, 3.95, 3.87, 3.83,
+                           3.79, 3.75, 3.71, 3.65, 3.50, 3.30]
+    battery_curve_soc:    [1.00, 0.90, 0.80, 0.70, 0.60, 0.50,
+                           0.40, 0.30, 0.20, 0.10, 0.05, 0.00]
 
     # Below these the comparison is noise dividing into noise
     slip_rate_floor_radps: 0.10

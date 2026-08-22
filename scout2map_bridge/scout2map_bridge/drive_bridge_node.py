@@ -88,6 +88,33 @@ class DriveBridge(Node):
         self.declare_parameter("gyro_bias_radps", 0.0)
 
         # Below this the ratio denominator is noise, so the signal is muted
+        # --- Battery ---
+        # State of charge is estimated from pack voltage against a LiPo
+        # discharge curve. There is no current sensor, so this is an estimate
+        # rather than coulomb counting, and it reads low under motor load.
+        self.declare_parameter("battery_cells", 3)
+        self.declare_parameter("battery_capacity_ah", 5.25)
+
+        # Per-cell breakpoints, descending. Defaults are a lightly loaded LiPo
+        # curve; the points bunch up near 3.7V because that is where the knee
+        # is and a coarse table there would read wildly wrong.
+        self.declare_parameter("battery_curve_cell_v", [
+            4.20, 4.10, 4.00, 3.95, 3.87, 3.83,
+            3.79, 3.75, 3.71, 3.65, 3.50, 3.30,
+        ])
+        self.declare_parameter("battery_curve_soc", [
+            1.00, 0.90, 0.80, 0.70, 0.60, 0.50,
+            0.40, 0.30, 0.20, 0.10, 0.05, 0.00,
+        ])
+
+        # Voltage sags the moment the motors draw current, so an unsmoothed
+        # estimate swings by tens of percent every time the robot starts and
+        # stops. Smoothing trades responsiveness for a readable number.
+        self.declare_parameter("battery_smoothing_s", 10.0)
+
+        # Set false to go back to publishing NaN
+        self.declare_parameter("battery_estimate_soc", True)
+
         self.declare_parameter("slip_rate_floor_radps", 0.10)
         self.declare_parameter("slip_min_wheel_speed_mps", 0.02)
 
@@ -122,6 +149,27 @@ class DriveBridge(Node):
         self._odom_wz_var = float(gp("odom_wz_variance").value)
         self._skid_factor = float(gp("skid_factor").value)
         self._gyro_bias = float(gp("gyro_bias_radps").value)
+        # --- Battery state of charge ---
+        self._batt_cells = max(1, int(gp("battery_cells").value))
+        self._batt_capacity_ah = float(gp("battery_capacity_ah").value)
+        self._batt_estimate = bool(gp("battery_estimate_soc").value)
+        self._batt_smoothing = max(0.0, float(gp("battery_smoothing_s").value))
+        self._batt_filtered_v = None
+        self._batt_last_mono = None
+
+        curve_v = [float(v) for v in gp("battery_curve_cell_v").value]
+        curve_soc = [float(v) for v in gp("battery_curve_soc").value]
+        if len(curve_v) != len(curve_soc) or len(curve_v) < 2:
+            self.get_logger().warn(
+                "battery curve is malformed; state of charge disabled")
+            self._batt_estimate = False
+            self._batt_curve = []
+        else:
+            # Sort descending by voltage so the lookup can assume ordering no
+            # matter how the parameter file lists them
+            self._batt_curve = sorted(
+                zip(curve_v, curve_soc), key=lambda p: p[0], reverse=True)
+
         self._slip_floor = float(gp("slip_rate_floor_radps").value)
         self._slip_min_speed = float(gp("slip_min_wheel_speed_mps").value)
 
@@ -499,14 +547,67 @@ class DriveBridge(Node):
             else:
                 msg.power_supply_health = BatteryState.POWER_SUPPLY_HEALTH_GOOD
 
-        # No discharge curve is characterised for this pack, and estimating
-        # one under motor load would be worse than admitting ignorance
-        msg.percentage = float("nan")
+        soc = self._estimate_soc(msg.voltage) if msg.present else None
+
+        if soc is None:
+            msg.percentage = float("nan")
+            msg.charge = float("nan")
+        else:
+            msg.percentage = soc
+            msg.charge = soc * self._batt_capacity_ah
+
+        if self._batt_capacity_ah > 0.0:
+            msg.capacity = self._batt_capacity_ah
+            msg.design_capacity = self._batt_capacity_ah
+        else:
+            msg.capacity = float("nan")
+            msg.design_capacity = float("nan")
+
+        # There is no shunt on this board, so current stays unknown. That is
+        # also why percentage is an estimate and not coulomb counting.
         msg.current = float("nan")
-        msg.charge = float("nan")
-        msg.capacity = float("nan")
-        msg.design_capacity = float("nan")
         self._pub_batt.publish(msg)
+
+    def _estimate_soc(self, voltage):
+        """State of charge from pack voltage, or None when not estimable.
+
+        Voltage under load sits well below the resting value, so the reading
+        is smoothed before lookup. Even so this reads pessimistic while
+        driving and recovers a few seconds after stopping. Treat it as a
+        coarse gauge, not a fuel meter.
+        """
+        if not self._batt_estimate or not self._batt_curve:
+            return None
+        if voltage != voltage or voltage <= 0.0:   # NaN or no reading
+            return None
+
+        now = time.monotonic()
+        if self._batt_filtered_v is None or self._batt_smoothing <= 0.0:
+            self._batt_filtered_v = voltage
+        else:
+            dt = now - (self._batt_last_mono or now)
+            # Exponential moving average with a time constant in seconds, so
+            # the behaviour does not change if the telemetry rate does
+            alpha = 1.0 - math.exp(-max(0.0, dt) / self._batt_smoothing)
+            self._batt_filtered_v += alpha * (voltage - self._batt_filtered_v)
+        self._batt_last_mono = now
+
+        cell_v = self._batt_filtered_v / self._batt_cells
+        curve = self._batt_curve
+
+        if cell_v >= curve[0][0]:
+            return float(curve[0][1])
+        if cell_v <= curve[-1][0]:
+            return float(curve[-1][1])
+
+        for (v_hi, soc_hi), (v_lo, soc_lo) in zip(curve, curve[1:]):
+            if v_lo <= cell_v <= v_hi:
+                span = v_hi - v_lo
+                if span <= 0.0:
+                    return float(soc_lo)
+                ratio = (cell_v - v_lo) / span
+                return float(soc_lo + ratio * (soc_hi - soc_lo))
+        return None
 
     def _compute_slip(self, spd_l, spd_r, gyro_z, status):
         """Compare the two independent yaw rate estimates.
