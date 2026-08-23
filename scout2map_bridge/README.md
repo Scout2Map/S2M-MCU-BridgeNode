@@ -269,7 +269,7 @@ STM32 주행 제어 MCU를 ROS2에 연결한다.
 
 | 토픽 | 타입 | 비고 |
 |---|---|---|
-| `/drive/odom` | `nav_msgs/Odometry` | `publish_tf`가 참이면 `odom`→`base_link` TF도 함께 |
+| `/drive/odom` | `nav_msgs/Odometry` | `publish_tf`가 참이면 `odom`→`base_link` TF도 함께. 방위는 기본적으로 BNO055 기준(`use_imu_orientation` 참고) |
 | `/drive/imu` | `sensor_msgs/Imu` | 각속도는 Z만 유효 |
 | `/drive/range` | `sensor_msgs/Range` | 센티널 처리 주의 |
 | `/drive/battery` | `sensor_msgs/BatteryState` | 미보고 시 `voltage=NaN` |
@@ -314,6 +314,9 @@ ros2 service call /drive/request_diagnostics std_srvs/srv/Trigger
 | `odom_xy_variance` | `0.001` | |
 | `odom_yaw_variance` | `0.01` | |
 | `odom_openloop_multiplier` | `100.0` | 개루프 시 공분산 배수 |
+| `use_imu_orientation` | `true` | `odom`/TF 방위를 BNO055 기준으로 발행. §16 참고 |
+| `imu_orientation_yaw_only` | `true` | IMU 쿼터니언에서 yaw만 취함 (roll/pitch는 버림, 평면 가정 유지) |
+| `odom_yaw_variance_uncalibrated` | `1.0` | `IMU_CALIBRATED` 꺼져 있을 때의 yaw 분산 |
 
 `max_linear_mps`를 0.262(무부하 76RPM)로 올리면 안 된다. 실제로 도달할 수
 없는 값이라 제어기가 영구 포화 상태에 놓인다.
@@ -327,18 +330,18 @@ VL53L0X로 교체한 경우 `range_min_m: 0.03`, `range_max_m: 1.20`으로 바�
 ## 15. TF를 누가 발행하는가
 
 기본값은 `drive_bridge`가 `odom`→`base_link`를 발행하는 것이다.
-`robot_localization` 등으로 IMU와 엔코더를 융합할 계획이라면
+`robot_localization` 등 별도 융합 노드를 붙일 계획이라면
 `publish_tf: false`로 내리고 그쪽에 맡긴다.
 
 **두 노드가 같은 TF를 발행하면 프레임이 떨린다.** 증상이 SLAM 품질 저하로만
 나타나서 원인 찾기가 어려우므로, 융합 노드를 도입하는 시점에 반드시 끈다.
 
-## 16. 오도메트리 신뢰도
+## 16. 오도메트리 신뢰도, 그리고 방위(orientation)의 출처
 
-펌웨어가 적분한 자세를 그대로 발행하고, 속도는 좌우 휠 속도에서 계산한다.
-공분산은 상태에 따라 달라진다.
+위치(x, y)와 선속도/각속도는 항상 펌웨어가 적분한 값과 좌우 휠 속도에서
+그대로 온다. 공분산은 상태에 따라 달라진다.
 
-| 상태 | x/y 분산 | yaw 분산 |
+| 상태 | x/y 분산 | yaw 분산 (엔코더 폴백 시) |
 |---|---|---|
 | 정상 (폐루프) | 0.001 | 0.01 |
 | `OPENLOOP` | 0.1 | 1.0 |
@@ -347,9 +350,36 @@ VL53L0X로 교체한 경우 `range_min_m: 0.03`, `range_max_m: 1.20`으로 바�
 기반 추정이라 사실상 믿을 수 없다. 공분산을 100배로 부풀려 하위 필터가
 스스로 알아내도록 방치하지 않는다.
 
-`Imu`의 방위 공분산도 마찬가지로 `IMU_CALIBRATED` 비트에 따라 달라진다.
-지자계 캘리브레이션 전에는 절대 방위가 드리프트하므로 yaw 분산을 1.0으로
-둔다. 상대적 자세 변화는 그 전에도 쓸 수 있다.
+**방위(orientation)는 기본적으로 엔코더가 아니라 BNO055에서 온다.**
+`use_imu_orientation: true`(기본값)일 때 `/drive/odom`과 `odom`→`base_link`
+TF의 회전 성분은 매 텔레메트리 프레임에 실려 오는 BNO055 절대 방위
+쿼터니언에서 뽑는다(`imu_orientation_yaw_only: true`면 그 중 yaw만).
+엔코더로 적분한 heading(`odom_th`)은 위치 계산에는 여전히 쓰이지만,
+발행되는 자세에는 반영되지 않는다.
+
+이렇게 바꾼 이유는 엔코더 heading이 **바퀴가 실제로 돌아야만** 갱신되기
+때문이다. 전원을 켠 직후에는 heading이 초기값(0)에 멈춰 있는데, BNO055는
+텔레메트리가 시작되는 순간부터 이미 실제 자세를 보고한다. RViz의 Imu
+디스플레이는 메시지의 orientation을 그대로 그리므로 이 시점에도 정상으로
+보이지만, RobotModel과 TF는 `/drive/odom`을 따라가므로 첫 이동 전까지는
+둘이 따로 논다. 그 상태에서 자율 주행을 시작하면 그 순간의 어긋남이 맵에
+그대로 박힌다. IMU를 방위의 기준으로 삼으면 텔레메트리 첫 프레임부터
+RobotModel/TF가 실제 자세와 일치하므로 이 문제가 사라진다.
+
+STATUS_IMU_OK 비트가 꺼져 있는 프레임(BNO055 부팅 중이거나 응답 없음)에서는
+자동으로 엔코더 heading으로 폴백한다. `use_imu_orientation: false`로 두면
+전체를 예전처럼 순수 엔코더 방위로 되돌릴 수 있다.
+
+`Imu`의 방위 공분산도, 그리고 이제 `/drive/odom`의 yaw 공분산도 마찬가지로
+`IMU_CALIBRATED` 비트에 따라 달라진다. 지자계 캘리브레이션 전에는 절대
+방위가 드리프트하므로 yaw 분산을 `odom_yaw_variance_uncalibrated`(기본
+1.0)로 둔다. 상대적 자세 변화는 그 전에도 쓸 수 있다.
+
+**주의:** 위치(x, y)는 여전히 엔코더 heading으로 적분된 값이라, 발행되는
+방위(IMU 기준)와 완전히 물리적으로 일관되지는 않는다(스킵 스티어링에서의
+슬립 오차 범위 안에서는 무시할 만하다). 위치까지 IMU와 정합시키려면
+`publish_tf: false`로 내리고 `robot_localization`의 EKF에 `/drive/odom`과
+`/drive/imu`를 함께 물리는 편이 정공법이다.
 
 ## 17. 상태 변화 로깅
 

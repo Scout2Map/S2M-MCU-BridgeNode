@@ -44,6 +44,26 @@ drive_bridge:
     odom_yaw_variance: 0.01
     odom_openloop_multiplier: 100.0
 
+    # --- Odom/TF orientation source ---
+    # Encoder heading only advances once the wheels turn, so at power-on it
+    # sits at zero while the BNO055 already reports the real attitude. Left
+    # alone, that mismatch is what makes RobotModel/TF disagree with the Imu
+    # display in RViz until the first deliberate motion, and it is whatever
+    # offset is baked in at that moment that autonomous nav then inherits.
+    # true: odom/TF orientation follows the BNO055, live from the first
+    #       STATUS_IMU_OK telemetry frame.
+    # false: pure encoder heading, restores the old behaviour.
+    use_imu_orientation: true
+
+    # Publish only the yaw component of the IMU quaternion. slam_toolbox and
+    # Nav2 both assume a planar robot, so roll/pitch would fight that.
+    imu_orientation_yaw_only: true
+
+    # Yaw variance reported while the BNO055 has not finished calibrating
+    # (mirrors the calibrated/uncalibrated split already used for the Imu
+    # message itself).
+    odom_yaw_variance_uncalibrated: 1.0
+
     # Twist is a direct measurement rather than an integration, so it carries
     # its own error. Derived from the 1.8 mm/s speed quantum (SPEED_WINDOW=4)
     # treated as uniform quantisation noise, q^2/12.

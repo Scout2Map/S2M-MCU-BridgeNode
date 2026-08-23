@@ -122,6 +122,29 @@ class DriveBridge(Node):
         self.declare_parameter("odom_xy_variance", 0.001)
         self.declare_parameter("odom_yaw_variance", 0.01)
         self.declare_parameter("odom_openloop_multiplier", 100.0)
+
+        # --- Odom/TF orientation source ---
+        # The BNO055 on the same MCU already fuses an absolute orientation and
+        # sends it in every telemetry frame, whether or not the wheels are
+        # turning. Encoder heading only updates once the robot actually moves,
+        # so at power-on it sits at its initial value while the IMU (and the
+        # RViz Imu display, which reads orientation straight off the message)
+        # already shows the real attitude. That mismatch is what carries into
+        # the map as a heading offset if autonomous nav starts before the
+        # robot has driven anywhere. Sourcing odom/TF orientation from the IMU
+        # instead keeps both in agreement from the first telemetry frame.
+        self.declare_parameter("use_imu_orientation", True)
+
+        # Publish only the yaw component of the IMU quaternion. slam_toolbox
+        # and Nav2 both treat this chassis as planar, so passing roll/pitch
+        # through here would fight that assumption instead of helping it.
+        self.declare_parameter("imu_orientation_yaw_only", True)
+
+        # Yaw variance to report while the BNO055 has not finished
+        # calibrating. Mirrors the calibrated/uncalibrated split already used
+        # in _publish_imu: an uncalibrated heading is a guess, and a filter
+        # downstream (or a person watching the topic) needs to be told that.
+        self.declare_parameter("odom_yaw_variance_uncalibrated", 1.0)
         # Twist is measured, not integrated, so it gets its own numbers.
         # Derived from the 1.8 mm/s speed quantum as q^2/12.
         self.declare_parameter("odom_vx_variance", 2.7e-7)
@@ -145,6 +168,10 @@ class DriveBridge(Node):
         self._odom_xy_var = float(gp("odom_xy_variance").value)
         self._odom_yaw_var = float(gp("odom_yaw_variance").value)
         self._openloop_mult = float(gp("odom_openloop_multiplier").value)
+        self._use_imu_orientation = bool(gp("use_imu_orientation").value)
+        self._imu_yaw_only = bool(gp("imu_orientation_yaw_only").value)
+        self._odom_yaw_var_uncal = float(
+            gp("odom_yaw_variance_uncalibrated").value)
         self._odom_vx_var = float(gp("odom_vx_variance").value)
         self._odom_wz_var = float(gp("odom_wz_variance").value)
         self._skid_factor = float(gp("skid_factor").value)
@@ -256,6 +283,16 @@ class DriveBridge(Node):
                 "gyro_bias_radps is 0.0. The BNO055 reads 1-2 deg/s at rest "
                 "before its gyro calibrates, which the slip signal will read "
                 "as rotation. Measure with s2m_imu_view.py --bias.")
+        if self._use_imu_orientation:
+            self.get_logger().info(
+                "odom/TF orientation sourced from the BNO055 "
+                f"(yaw_only={self._imu_yaw_only}); falls back to encoder "
+                "heading until the first STATUS_IMU_OK telemetry frame.")
+        else:
+            self.get_logger().warn(
+                "use_imu_orientation is false, odom/TF orientation is pure "
+                "encoder heading and will disagree with the Imu display "
+                "until the wheels move.")
 
     # ------------------------------------------------------------------
     # Serial callbacks
@@ -345,7 +382,8 @@ class DriveBridge(Node):
         stamp = self.get_clock().now().to_msg()
         openloop = bool(status & proto.STATUS_OPENLOOP)
 
-        self._publish_odom(stamp, odom_x, odom_y, odom_th, spd_l, spd_r, openloop)
+        self._publish_odom(stamp, odom_x, odom_y, odom_th, spd_l, spd_r,
+                          openloop, qw, qx, qy, qz, status)
         self._publish_imu(stamp, qw, qx, qy, qz, gyro_z, acc_x, acc_y, acc_z, status)
         self._publish_range(stamp, dist_mm)
         self._publish_battery(stamp, batt_mv, status)
@@ -396,10 +434,11 @@ class DriveBridge(Node):
     # ------------------------------------------------------------------
     # Publishers
     # ------------------------------------------------------------------
-    def _publish_odom(self, stamp, x_mm, y_mm, th_mrad, spd_l, spd_r, openloop):
+    def _publish_odom(self, stamp, x_mm, y_mm, th_mrad, spd_l, spd_r,
+                      openloop, qw, qx, qy, qz, status):
         x = x_mm / proto.MM_PER_M
         y = y_mm / proto.MM_PER_M
-        theta = th_mrad / proto.MRAD_PER_RAD
+        theta_enc = th_mrad / proto.MRAD_PER_RAD
 
         # Body twist from the two wheel speeds
         v_l = spd_l / proto.MMPS_PER_MPS
@@ -407,13 +446,22 @@ class DriveBridge(Node):
         v = (v_l + v_r) * 0.5
         w = (v_r - v_l) / self._track_width if self._track_width > 0 else 0.0
 
+        # Encoder heading only advances once the wheels turn, so right after
+        # boot it sits at its initial value while the BNO055 already knows
+        # the real attitude (it fuses accel+gyro+mag continuously, whether or
+        # not the robot has moved). Preferring the IMU here is what keeps
+        # RobotModel/TF in agreement with the Imu display from the first
+        # telemetry frame instead of only after the first deliberate turn.
+        orientation, yaw_var = self._resolve_orientation(
+            theta_enc, qw, qx, qy, qz, status)
+
         msg = Odometry()
         msg.header.stamp = stamp
         msg.header.frame_id = self._odom_frame
         msg.child_frame_id = self._base_frame
         msg.pose.pose.position.x = x
         msg.pose.pose.position.y = y
-        msg.pose.pose.orientation = _yaw_to_quat(theta)
+        msg.pose.pose.orientation = orientation
         msg.twist.twist.linear.x = v
         msg.twist.twist.angular.z = w
 
@@ -430,7 +478,7 @@ class DriveBridge(Node):
         pose_cov[14] = 1e6                          # z, planar robot
         pose_cov[21] = 1e6                          # roll
         pose_cov[28] = 1e6                          # pitch
-        pose_cov[35] = self._odom_yaw_var * mult    # yaw
+        pose_cov[35] = yaw_var * mult                # yaw
         msg.pose.covariance = pose_cov
 
         # Twist is a direct measurement, not an integration, so it carries
@@ -455,6 +503,34 @@ class DriveBridge(Node):
             tf.transform.translation.y = y
             tf.transform.rotation = msg.pose.pose.orientation
             self._tf_broadcaster.sendTransform(tf)
+
+    def _resolve_orientation(self, theta_enc, qw, qx, qy, qz, status):
+        """Pick the odom/TF orientation and its yaw variance.
+
+        Falls back to encoder heading whenever the IMU is disabled by
+        parameter or the current frame reports STATUS_IMU_OK false (BNO055
+        still booting, or the MCU lost it). That keeps the very first frames
+        after power-on sane instead of publishing a stale or zeroed quaternion.
+        """
+        imu_ok = bool(status & proto.STATUS_IMU_OK)
+        if not (self._use_imu_orientation and imu_ok):
+            return _yaw_to_quat(theta_enc), self._odom_yaw_var
+
+        w = qw * proto.QUAT_SCALE
+        x = qx * proto.QUAT_SCALE
+        y = qy * proto.QUAT_SCALE
+        z = qz * proto.QUAT_SCALE
+
+        if self._imu_yaw_only:
+            # The rest of the stack (slam_toolbox, Nav2) assumes a planar
+            # robot, so roll/pitch from the IMU would only fight that.
+            orientation = _yaw_to_quat(_quat_to_yaw(w, x, y, z))
+        else:
+            orientation = Quaternion(w=w, x=x, y=y, z=z)
+
+        calibrated = bool(status & proto.STATUS_IMU_CALIBRATED)
+        yaw_var = self._odom_yaw_var if calibrated else self._odom_yaw_var_uncal
+        return orientation, yaw_var
 
     def _publish_imu(self, stamp, qw, qx, qy, qz, gyro_z,
                      acc_x, acc_y, acc_z, status):
@@ -813,6 +889,13 @@ def _yaw_to_quat(yaw: float) -> Quaternion:
     q.z = math.sin(yaw * 0.5)
     q.w = math.cos(yaw * 0.5)
     return q
+
+
+def _quat_to_yaw(w: float, x: float, y: float, z: float) -> float:
+    """Yaw (Z axis) component of a quaternion, standard ZYX convention."""
+    siny_cosp = 2.0 * (w * z + x * y)
+    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+    return math.atan2(siny_cosp, cosy_cosp)
 
 
 def main(args=None):
