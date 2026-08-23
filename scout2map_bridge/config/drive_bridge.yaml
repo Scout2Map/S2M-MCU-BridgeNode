@@ -64,6 +64,31 @@ drive_bridge:
     # message itself).
     odom_yaw_variance_uncalibrated: 1.0
 
+    # 180 degrees. Confirmed 2026-08-23 that S2M-FW-DrivingControl's
+    # BNO055_AXIS_MAP/BNO055_AXIS_SIGN remap (0x24/0x06) is correct and
+    # active for the accelerometer -- tools/s2m_imu_view.py --axes reads
+    # gravity only and twice reported the module already aligned -- but
+    # the fused orientation quaternion stays 180 degrees off regardless.
+    # Isolated with BNO055_MODE_IMU_TEST (accel+gyro only, no
+    # magnetometer): the error persisted with no absolute reference in
+    # play at all, which rules out a magnetic disturbance and means the
+    # remap simply never reaches the fusion quaternion on this chip,
+    # only the raw accel/gyro/mag registers. This matches other reports
+    # of the same BNO055 limitation: AXIS_MAP/AXIS_SIGN reorient the raw
+    # sensor registers but not the fused Euler/quaternion output.
+    #
+    # Correcting it here is the practical fix: this bridge sees the same
+    # wrong quaternion no matter where inside the chip it goes wrong, so
+    # a yaw-only rotation applied on receipt is exactly as valid as one
+    # applied inside the chip would have been, and needs no reflash to
+    # change. Do not also add a firmware-side quaternion correction on
+    # top of this without setting this back to 0.0 first, or the two
+    # corrections add together (180 + 180 = 360) and reproduce the bug.
+    #
+    # Re-zero and re-derive if the module is ever remounted, or if a
+    # future firmware fix corrects the quaternion at the source.
+    imu_yaw_offset_rad: 3.14159265
+
     # Twist is a direct measurement rather than an integration, so it carries
     # its own error. Derived from the 1.8 mm/s speed quantum (SPEED_WINDOW=4)
     # treated as uniform quantisation noise, q^2/12.

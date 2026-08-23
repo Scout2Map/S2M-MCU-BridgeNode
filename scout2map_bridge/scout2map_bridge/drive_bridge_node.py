@@ -145,6 +145,32 @@ class DriveBridge(Node):
         # in _publish_imu: an uncalibrated heading is a guess, and a filter
         # downstream (or a person watching the topic) needs to be told that.
         self.declare_parameter("odom_yaw_variance_uncalibrated", 1.0)
+
+        # 2026-08-23: confirmed the BNO055's own AXIS_MAP/AXIS_SIGN remap
+        # (S2M-FW-DrivingControl, config/board_config.h) reorients the raw
+        # accelerometer/gyro/magnetometer registers correctly -- tools/
+        # s2m_imu_view.py --axes reads gravity only and reported the module
+        # already aligned -- but the FUSED orientation quaternion this
+        # bridge actually receives stays 180 degrees off regardless.
+        # Isolated with BNO055_MODE_IMU_TEST (accel + gyro only, no
+        # magnetometer): the error persisted with no absolute reference in
+        # play at all, which rules out magnetic interference and means the
+        # remap never reaches the fusion quaternion on this chip, only the
+        # raw sensor registers. Matches other reports of the same BNO055
+        # limitation.
+        #
+        # Correcting it here is the practical fix: this bridge sees the
+        # same wrong quaternion no matter where inside the chip it goes
+        # wrong, so a yaw-only rotation applied on receipt is exactly as
+        # valid as one applied inside the chip would have been, and needs
+        # no reflash to change. Do not also add a firmware-side quaternion
+        # correction on top of this without setting this back to 0.0 first,
+        # or the two corrections add together (180 + 180 = 360) and
+        # reproduce the original bug.
+        #
+        # Re-zero and re-derive if the module is ever remounted, or if a
+        # future firmware fix corrects the quaternion at the source.
+        self.declare_parameter("imu_yaw_offset_rad", 3.14159265)
         # Twist is measured, not integrated, so it gets its own numbers.
         # Derived from the 1.8 mm/s speed quantum as q^2/12.
         self.declare_parameter("odom_vx_variance", 2.7e-7)
@@ -172,6 +198,7 @@ class DriveBridge(Node):
         self._imu_yaw_only = bool(gp("imu_orientation_yaw_only").value)
         self._odom_yaw_var_uncal = float(
             gp("odom_yaw_variance_uncalibrated").value)
+        self._imu_yaw_offset = float(gp("imu_yaw_offset_rad").value)
         self._odom_vx_var = float(gp("odom_vx_variance").value)
         self._odom_wz_var = float(gp("odom_wz_variance").value)
         self._skid_factor = float(gp("skid_factor").value)
@@ -524,8 +551,12 @@ class DriveBridge(Node):
         if self._imu_yaw_only:
             # The rest of the stack (slam_toolbox, Nav2) assumes a planar
             # robot, so roll/pitch from the IMU would only fight that.
-            orientation = _yaw_to_quat(_quat_to_yaw(w, x, y, z))
+            # Mounting offset is applied here as a plain angle add, which is
+            # exactly equivalent to rotating the quaternion first.
+            yaw = _quat_to_yaw(w, x, y, z) + self._imu_yaw_offset
+            orientation = _yaw_to_quat(yaw)
         else:
+            w, x, y, z = _apply_yaw_offset(w, x, y, z, self._imu_yaw_offset)
             orientation = Quaternion(w=w, x=x, y=y, z=z)
 
         calibrated = bool(status & proto.STATUS_IMU_CALIBRATED)
@@ -546,17 +577,37 @@ class DriveBridge(Node):
             self._pub_imu.publish(msg)
             return
 
-        msg.orientation.w = qw * proto.QUAT_SCALE
-        msg.orientation.x = qx * proto.QUAT_SCALE
-        msg.orientation.y = qy * proto.QUAT_SCALE
-        msg.orientation.z = qz * proto.QUAT_SCALE
+        # imu_frame is declared in the URDF with zero rotation from
+        # base_link, so this message has to actually be in that frame. The
+        # raw BNO055 reading is not: it is yaw-rotated by imu_yaw_offset_rad
+        # relative to chassis forward (see the parameter declaration above),
+        # so both the orientation and the horizontal acceleration axes are
+        # corrected here before publishing. gyro_z is left alone: rotating
+        # about the same axis you are spinning around does not change a
+        # rate measurement, only angular velocity around a *different* axis
+        # would, and roll/pitch rate are not transmitted at all.
+        ow, ox, oy, oz = _apply_yaw_offset(
+            qw * proto.QUAT_SCALE, qx * proto.QUAT_SCALE,
+            qy * proto.QUAT_SCALE, qz * proto.QUAT_SCALE,
+            self._imu_yaw_offset)
+        msg.orientation.w = ow
+        msg.orientation.x = ox
+        msg.orientation.y = oy
+        msg.orientation.z = oz
 
         # Only the yaw rate is transmitted; roll and pitch rates are unknown
         msg.angular_velocity.z = gyro_z * proto.GYRO_SCALE * DEG_TO_RAD
 
-        # Gravity is included, as sensor_msgs expects
-        msg.linear_acceleration.x = acc_x * proto.ACCEL_SCALE
-        msg.linear_acceleration.y = acc_y * proto.ACCEL_SCALE
+        # Gravity is included, as sensor_msgs expects. Rotate the horizontal
+        # components by the same mounting offset as the orientation above;
+        # acc_z is along the shared vertical axis and needs no correction
+        # for a pure yaw offset.
+        cos_off = math.cos(self._imu_yaw_offset)
+        sin_off = math.sin(self._imu_yaw_offset)
+        ax = acc_x * proto.ACCEL_SCALE
+        ay = acc_y * proto.ACCEL_SCALE
+        msg.linear_acceleration.x = ax * cos_off - ay * sin_off
+        msg.linear_acceleration.y = ax * sin_off + ay * cos_off
         msg.linear_acceleration.z = acc_z * proto.ACCEL_SCALE
 
         # Heading drifts until the magnetometer is calibrated, so the
@@ -896,6 +947,24 @@ def _quat_to_yaw(w: float, x: float, y: float, z: float) -> float:
     siny_cosp = 2.0 * (w * z + x * y)
     cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
     return math.atan2(siny_cosp, cosy_cosp)
+
+
+def _apply_yaw_offset(w: float, x: float, y: float, z: float,
+                      offset: float) -> tuple:
+    """Rotate a quaternion by a fixed yaw about Z: offset_quat * quat.
+
+    Used to correct a constant sensor-mounting error (the IMU's own yaw=0
+    reference is not lined up with chassis forward) while keeping whatever
+    roll/pitch the quaternion carries.
+    """
+    ow = math.cos(offset * 0.5)
+    oz = math.sin(offset * 0.5)
+    return (
+        ow * w - oz * z,
+        ow * x - oz * y,
+        ow * y + oz * x,
+        ow * z + oz * w,
+    )
 
 
 def main(args=None):

@@ -270,7 +270,7 @@ STM32 주행 제어 MCU를 ROS2에 연결한다.
 | 토픽 | 타입 | 비고 |
 |---|---|---|
 | `/drive/odom` | `nav_msgs/Odometry` | `publish_tf`가 참이면 `odom`→`base_link` TF도 함께. 방위는 기본적으로 BNO055 기준(`use_imu_orientation` 참고) |
-| `/drive/imu` | `sensor_msgs/Imu` | 각속도는 Z만 유효 |
+| `/drive/imu` | `sensor_msgs/Imu` | 각속도는 Z만 유효. orientation/수평 가속도는 `imu_yaw_offset_rad`로 마운팅 보정된 값 |
 | `/drive/range` | `sensor_msgs/Range` | 센티널 처리 주의 |
 | `/drive/battery` | `sensor_msgs/BatteryState` | 미보고 시 `voltage=NaN` |
 | `/drive/status` | `scout2map_msgs/DriveStatus` | 10Hz |
@@ -317,6 +317,7 @@ ros2 service call /drive/request_diagnostics std_srvs/srv/Trigger
 | `use_imu_orientation` | `true` | `odom`/TF 방위를 BNO055 기준으로 발행. §16 참고 |
 | `imu_orientation_yaw_only` | `true` | IMU 쿼터니언에서 yaw만 취함 (roll/pitch는 버림, 평면 가정 유지) |
 | `odom_yaw_variance_uncalibrated` | `1.0` | `IMU_CALIBRATED` 꺼져 있을 때의 yaw 분산 |
+| `imu_yaw_offset_rad` | `3.14159265` | BNO055 마운팅 보정. §16 참고 |
 
 `max_linear_mps`를 0.262(무부하 76RPM)로 올리면 안 된다. 실제로 도달할 수
 없는 값이라 제어기가 영구 포화 상태에 놓인다.
