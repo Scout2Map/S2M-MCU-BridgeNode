@@ -18,7 +18,7 @@ drive_bridge:
     command_rate_hz: 20.0
 
     # No cmd_vel within this window and the bridge commands a stop itself
-    command_timeout_s: 0.25
+    command_timeout_s: 0.6
 
     # Clamps applied before the command goes down. The firmware clamps too,
     # but doing it here keeps the reported command honest.
