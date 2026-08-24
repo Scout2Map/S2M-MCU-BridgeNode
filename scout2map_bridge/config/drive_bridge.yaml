@@ -29,10 +29,15 @@ drive_bridge:
     link_timeout_s: 0.5
     status_rate_hz: 10.0
 
-    # Distance sensor geometry. Change these when swapping the analog IR
-    # part for the VL53L0X: that one reads 0.03 to 1.20 m.
-    range_min_m: 0.04
-    range_max_m: 0.30
+    # Distance sensor geometry. board_config.h DIST_SENSOR currently selects
+    # the VL53L0X (0.03 to 1.20 m), not the analog IR part (0.04 to 0.30 m).
+    # These were left at the analog IR values: sensor_msgs/Range consumers
+    # (RViz, costmap) discard any reading outside [range_min_m, range_max_m],
+    # so with the old 0.30 ceiling almost every real VL53L0X reading beyond
+    # 30cm was silently dropped. Re-check against board_config.h if the
+    # sensor is swapped again.
+    range_min_m: 0.03
+    range_max_m: 1.20
     range_fov_rad: 0.14
 
     # Used only until BOOT_INFO reports the real value
