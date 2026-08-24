@@ -476,7 +476,17 @@ class DriveBridge(Node):
         v_l = spd_l / proto.MMPS_PER_MPS
         v_r = spd_r / proto.MMPS_PER_MPS
         v = (v_l + v_r) * 0.5
-        w = (v_r - v_l) / self._track_width if self._track_width > 0 else 0.0
+
+        # This chassis is a four wheel skid steer: a turn drags all four
+        # wheels sideways, so the geometric track width alone under
+        # predicts how much wheel speed difference a given yaw rate needs
+        # (see skid_factor's declaration and _compute_slip, which already
+        # applies the same correction to its own encoder yaw estimate).
+        # Leaving it out here made the twist published on /odom read about
+        # 41% low on yaw rate at the measured skid_factor of 1.41, silent
+        # since nothing consumed it yet.
+        effective_track = self._track_width * self._skid_factor
+        w = (v_r - v_l) / effective_track if effective_track > 0 else 0.0
 
         # Encoder heading only advances once the wheels turn, so right after
         # boot it sits at its initial value while the BNO055 already knows
