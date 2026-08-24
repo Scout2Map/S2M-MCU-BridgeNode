@@ -583,14 +583,19 @@ class DriveBridge(Node):
             return
 
         # imu_frame is declared in the URDF with zero rotation from
-        # base_link, so this message has to actually be in that frame. The
-        # raw BNO055 reading is not: it is yaw-rotated by imu_yaw_offset_rad
-        # relative to chassis forward (see the parameter declaration above),
-        # so both the orientation and the horizontal acceleration axes are
-        # corrected here before publishing. gyro_z is left alone: rotating
-        # about the same axis you are spinning around does not change a
-        # rate measurement, only angular velocity around a *different* axis
-        # would, and roll/pitch rate are not transmitted at all.
+        # base_link, so this message has to actually be in that frame. Only
+        # the FUSED quaternion needs the yaw correction: per the 2026-08-23
+        # investigation (see imu-tf-orientation-fix notes), the BNO055's
+        # AXIS_MAP/AXIS_SIGN remap in board_config.h already reorients the
+        # raw accel/gyro/mag registers correctly (confirmed with
+        # s2m_imu_view.py --axes and with BNO055_MODE_IMU_TEST), and only the
+        # fusion quaternion output stays off by imu_yaw_offset_rad. Applying
+        # the same rotation to the raw acceleration here double-corrected it
+        # (chip-side 180 degrees, then this offset again = 360), which
+        # silently flipped the horizontal acceleration sign. gyro_z is left
+        # alone for the same reason plus the usual one: rotating about the
+        # same axis you are spinning around does not change a rate
+        # measurement, and roll/pitch rate are not transmitted at all.
         ow, ox, oy, oz = _apply_yaw_offset(
             qw * proto.QUAT_SCALE, qx * proto.QUAT_SCALE,
             qy * proto.QUAT_SCALE, qz * proto.QUAT_SCALE,
@@ -603,16 +608,11 @@ class DriveBridge(Node):
         # Only the yaw rate is transmitted; roll and pitch rates are unknown
         msg.angular_velocity.z = gyro_z * proto.GYRO_SCALE * DEG_TO_RAD
 
-        # Gravity is included, as sensor_msgs expects. Rotate the horizontal
-        # components by the same mounting offset as the orientation above;
-        # acc_z is along the shared vertical axis and needs no correction
-        # for a pure yaw offset.
-        cos_off = math.cos(self._imu_yaw_offset)
-        sin_off = math.sin(self._imu_yaw_offset)
-        ax = acc_x * proto.ACCEL_SCALE
-        ay = acc_y * proto.ACCEL_SCALE
-        msg.linear_acceleration.x = ax * cos_off - ay * sin_off
-        msg.linear_acceleration.y = ax * sin_off + ay * cos_off
+        # Gravity is included, as sensor_msgs expects. Raw acceleration is
+        # already correctly oriented at the chip (see note above), so no
+        # rotation is applied here.
+        msg.linear_acceleration.x = acc_x * proto.ACCEL_SCALE
+        msg.linear_acceleration.y = acc_y * proto.ACCEL_SCALE
         msg.linear_acceleration.z = acc_z * proto.ACCEL_SCALE
 
         # Heading drifts until the magnetometer is calibrated, so the
