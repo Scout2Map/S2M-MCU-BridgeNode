@@ -32,7 +32,10 @@ class SerialLink(threading.Thread):
         self._log = logger
         self._on_open = on_open       # called after each successful open
         self._ser = None
-        self._stop = threading.Event()
+        # Not _stop: threading.Thread already has a private _stop() that
+        # join() calls internally, and shadowing it with an Event makes
+        # any join() on this object raise "'Event' object is not callable"
+        self._stop_evt = threading.Event()
         self._open_flag = threading.Event()
         self._write_lock = threading.Lock()
 
@@ -44,8 +47,20 @@ class SerialLink(threading.Thread):
     def port_name(self):
         return self._port_name
 
-    def stop(self):
-        self._stop.set()
+    def stop(self, timeout=1.0):
+        """Stop the reader thread, then close the port.
+
+        Closing from the caller's thread while run() is parked inside
+        read() pulls pyserial's file descriptor out from under it. That
+        surfaces as a TypeError from os.read rather than a
+        SerialException, so it escapes run()'s except clause and prints a
+        thread traceback on every clean shutdown. Letting the reader
+        notice the stop event first keeps the handle owned by one thread;
+        the 0.1s read timeout means the wait is short.
+        """
+        self._stop_evt.set()
+        if self.is_alive() and threading.current_thread() is not self:
+            self.join(timeout)
         self._close()
 
     def write(self, data: bytes) -> bool:
@@ -66,16 +81,29 @@ class SerialLink(threading.Thread):
             return False
 
     def run(self):
-        while not self._stop.is_set():
+        while not self._stop_evt.is_set():
             if self._ser is None:
                 if not self._try_open():
-                    self._stop.wait(REOPEN_DELAY_S)
+                    self._stop_evt.wait(REOPEN_DELAY_S)
+                continue
+
+            # Local reference: _close() from another thread can null the
+            # attribute between the check above and the read below
+            ser = self._ser
+            if ser is None:
                 continue
 
             try:
-                chunk = self._ser.read(READ_CHUNK)
+                chunk = ser.read(READ_CHUNK)
             except (serial.SerialException, OSError) as exc:
                 self._close(f"read failed: {exc}")
+                continue
+            except (TypeError, AttributeError) as exc:
+                # The handle was closed underneath this read. Expected
+                # during shutdown, worth a warning at any other time.
+                if self._stop_evt.is_set():
+                    break
+                self._close(f"handle closed during read: {exc}")
                 continue
 
             if chunk:
