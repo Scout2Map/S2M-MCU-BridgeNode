@@ -370,12 +370,15 @@ class DriveBridge(Node):
     # ------------------------------------------------------------------
     def _on_boot_info(self, payload):
         (ver, major, minor, patch,
-         counts_per_rev, track_mm) = proto.unpack(
+         counts_per_rev, track_mm,
+         dist_sensor, _reserved, rotate_min_clearance_mm) = proto.unpack(
             proto.BOOT_INFO_FMT, payload, "boot info")
 
         self._boot_info = {
             "proto": ver, "major": major, "minor": minor, "patch": patch,
             "counts_per_rev": counts_per_rev, "track_mm": track_mm,
+            "dist_sensor": dist_sensor,
+            "rotate_min_clearance_mm": rotate_min_clearance_mm,
         }
         if track_mm > 0:
             # Trust the firmware over the parameter: it knows the build
@@ -383,7 +386,9 @@ class DriveBridge(Node):
 
         self.get_logger().info(
             f"MCU boot: fw {major}.{minor}.{patch}, proto v{ver}, "
-            f"{counts_per_rev} counts/rev, track {track_mm}mm")
+            f"{counts_per_rev} counts/rev, track {track_mm}mm, "
+            f"dist_sensor={dist_sensor}, "
+            f"rotate_min_clearance={rotate_min_clearance_mm}mm")
 
         if ver != proto.PROTO_VERSION:
             self.get_logger().error(

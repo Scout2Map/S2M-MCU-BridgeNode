@@ -75,13 +75,20 @@ STATUS_BATT_DEAD = 1 << 9
 # The struct field lists are authoritative and give 56, 24 and 18.
 # Never hard code these numbers; derive them with calcsize so a firmware
 # change surfaces as a clear version error instead of a silent misparse.
+#
+# 2026-08-24: BOOT_INFO_FMT was missing the dist_sensor/reserved/
+# rotate_min_clearance_mm fields added to boot_info_t in protocol.h. That
+# made every BOOT_INFO frame fail unpack() (8 bytes parsed vs 12 sent),
+# which silently disabled boot_info entirely: track width and proto version
+# from the MCU never reached the bridge. Verified against a live compile of
+# protocol.h that sizeof(boot_info_t) == 12.
 TELEMETRY_FMT = "<IiihhiiihhhhhhhhHHhhHBB"
-BOOT_INFO_FMT = "<BBBBHH"
+BOOT_INFO_FMT = "<BBBBHHBBH"
 DIAG_FMT = "<BBBBIIHHHHHH"
 I2C_SCAN_FMT = "<BB16s"
 
 TELEMETRY_LEN = struct.calcsize(TELEMETRY_FMT)   # 56
-BOOT_INFO_LEN = struct.calcsize(BOOT_INFO_FMT)   # 8
+BOOT_INFO_LEN = struct.calcsize(BOOT_INFO_FMT)   # 12
 DIAG_LEN = struct.calcsize(DIAG_FMT)             # 24
 I2C_SCAN_LEN = struct.calcsize(I2C_SCAN_FMT)     # 18
 
