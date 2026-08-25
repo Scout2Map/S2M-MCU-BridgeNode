@@ -12,6 +12,7 @@
 # command a stop rather than let the last command stand.
 
 import math
+import subprocess
 import threading
 import time
 
@@ -261,6 +262,16 @@ class DriveBridge(Node):
         self.create_service(Trigger, "drive/clear_fault", self._srv_clear_fault)
         self.create_service(Trigger, "drive/reset_odom", self._srv_reset_odom)
         self.create_service(Trigger, "drive/request_diagnostics", self._srv_diag)
+
+        # --- Task Launch Services ---
+        self.create_service(Trigger, "task/start_explore", self._srv_start_explore)
+        self.create_service(Trigger, "task/stop_explore", self._srv_stop_explore)
+        self.create_service(Trigger, "task/start_return_home", self._srv_start_return_home)
+        self.create_service(Trigger, "task/stop_return_home", self._srv_stop_return_home)
+
+        # Subprocess Handles
+        self._proc_explore = None
+        self._proc_return = None
 
         # ---------------- State ----------------
         self._cmd_lock = threading.Lock()
@@ -940,7 +951,85 @@ class DriveBridge(Node):
         return self._send_simple(
             proto.MSG_CMD_DIAG, "diagnostics request", response)
 
+    # ------------------------------------------------------------------
+    # Subprocess Task Controllers (Explore / Return Home)
+    # ------------------------------------------------------------------
+    def _srv_start_explore(self, _request, response):
+        if self._proc_explore and self._proc_explore.poll() is None:
+            response.success = False
+            response.message = "Explore task is already running"
+            return response
+
+        try:
+            self._proc_explore = subprocess.Popen(
+                ["ros2", "launch", "explore_lite", "explore.launch.py"]
+            )
+            response.success = True
+            response.message = "Explore task started successfully"
+            self.get_logger().info("Started task: explore_lite")
+        except Exception as e:
+            response.success = False
+            response.message = f"Failed to start explore task: {str(e)}"
+            self.get_logger().error(response.message)
+        return response
+
+    def _srv_stop_explore(self, _request, response):
+        if self._proc_explore and self._proc_explore.poll() is None:
+            self._proc_explore.terminate()
+            try:
+                self._proc_explore.wait(timeout=5.0)
+            except subprocess.TimeoutExpired:
+                self._proc_explore.kill()
+            self._proc_explore = None
+            response.success = True
+            response.message = "Explore task stopped"
+            self.get_logger().info("Stopped task: explore_lite")
+        else:
+            response.success = False
+            response.message = "Explore task is not running"
+        return response
+
+    def _srv_start_return_home(self, _request, response):
+        if self._proc_return and self._proc_return.poll() is None:
+            response.success = False
+            response.message = "Return Home task is already running"
+            return response
+
+        try:
+            self._proc_return = subprocess.Popen(
+                ["ros2", "launch", "s2m_bringup", "s2m_return_home_real.launch.py"]
+            )
+            response.success = True
+            response.message = "Return Home task started successfully"
+            self.get_logger().info("Started task: s2m_return_home_real")
+        except Exception as e:
+            response.success = False
+            response.message = f"Failed to start Return Home task: {str(e)}"
+            self.get_logger().error(response.message)
+        return response
+
+    def _srv_stop_return_home(self, _request, response):
+        if self._proc_return and self._proc_return.poll() is None:
+            self._proc_return.terminate()
+            try:
+                self._proc_return.wait(timeout=5.0)
+            except subprocess.TimeoutExpired:
+                self._proc_return.kill()
+            self._proc_return = None
+            response.success = True
+            response.message = "Return Home task stopped"
+            self.get_logger().info("Stopped task: s2m_return_home_real")
+        else:
+            response.success = False
+            response.message = "Return Home task is not running"
+        return response
+
     def destroy_node(self):
+        # Clean up any active task subprocesses
+        for proc in (self._proc_explore, self._proc_return):
+            if proc and proc.poll() is None:
+                proc.terminate()
+
         # Best effort stop: the MCU watchdog covers us if this does not land
         try:
             self._link.write(proto.encode_velocity(0.0, 0.0))
