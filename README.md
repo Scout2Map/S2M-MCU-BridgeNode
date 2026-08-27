@@ -1,6 +1,6 @@
-# scout2map-bridge
+# S2M-MCU-BridgeNode
 
-Scout2Map UGV의 **센서 퓨전 MCU(Raspberry Pi Pico 2)와 ROS2를 연결하는 브릿지**다.
+**Scout2Map** — 다중 센서 기반 환경 적응형 정찰 UGV의 **센서 퓨전 MCU(Raspberry Pi Pico 2) 및 주행 제어 MCU(STM32)와 ROS2를 연결하는 브릿지**다.
 RPi5에서 동작하며, ROS2 패키지 두 개로 구성된다.
 
 ---
@@ -311,6 +311,7 @@ ros2 topic echo /sensors/env_snapshot
 ```
 
 ---
+
 ## 6. 하드웨어 없이 개발하기
 
 UGV가 한 대뿐이라 팀원이 돌아가며 실기를 쓸 수 없다.
@@ -441,9 +442,6 @@ ros2 topic echo /sensors/env_snapshot
 이벤트 엔진처럼 브릿지 없이 메시지 타입만 필요한 경우에도
 현재는 이 레포를 통째로 클론해 두 패키지를 함께 빌드하면 된다.
 브릿지 노드를 실행하지 않으면 그만이다.
-
-인터페이스가 안정된 뒤에는 `scout2map_msgs`를 별도 레포로 분리하는 편이 낫다.
-지금 분리하면 필드 하나를 고칠 때마다 두 레포를 함께 커밋해야 해서 오히려 번거롭다.
 
 ---
 
