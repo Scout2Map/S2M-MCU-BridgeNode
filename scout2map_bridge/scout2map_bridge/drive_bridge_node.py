@@ -64,7 +64,7 @@ class DriveBridge(Node):
 
         # Link health
         self.declare_parameter("link_timeout_s", 0.5)
-        self.declare_parameter("status_rate_hz", 10.0)
+        self.declare_parameter("status_rate_hz", 5.0)
 
         # Distance sensor geometry, depends on which part is fitted
         self.declare_parameter("range_min_m", 0.04)
