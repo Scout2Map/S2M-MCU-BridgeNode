@@ -26,6 +26,10 @@ GP2D120X  ────┘                    ▲                   │
 주행 브릿지가 잘못 멈추면 차체가 마지막 명령대로 계속 굴러간다.
 그래서 명령 경로에 워치독이 두 겹으로 들어간다.
 
+두 MCU 브릿지와 별개로, 이벤트 엔진의 `/events`를 구독해 **RPi5 자체 GPIO**를
+켜고 끄는 `gpio_events` 노드도 이 레포에 있다 (11절). MCU와 무관하게 RPi5
+헤더 핀만 쓰므로 시리얼 링크 어느 쪽과도 얽히지 않는다.
+
 **이 레포의 목적은 다른 파트가 시리얼도 프로토콜도 몰라도 되게 만드는 것**이다.
 이벤트 엔진은 `/sensors/env_snapshot`을, Nav2는 `/drive/odom`과 `/cmd_vel`을
 쓰면 되고, 어느 쪽도 USB 아래를 알 필요가 없다.
@@ -56,7 +60,9 @@ scout2map-bridge/
     │   ├── drive_bridge_node.py  # 주행 제어 MCU (STM32)
     │   ├── drive_protocol.py     #   STM32 와이어 포맷
     │   ├── serial_link.py        #   포트 개방/재연결 공용
-    │   └── fake_sensor_node.py   # 하드웨어 없이 쓰는 가짜 퍼블리셔 (6절)
+    │   ├── fake_sensor_node.py   # 하드웨어 없이 쓰는 가짜 퍼블리셔 (6절)
+    │   ├── gpio_event_node.py    # /events -> RPi5 GPIO 출력 (11절)
+    │   └── gpio_mapping_db.py    #   이벤트-GPIO 매핑 저장 (SQLite)
     ├── PROTOCOL.md       #   ★ STM32 바이너리 프로토콜 명세
     ├── config/           #   파라미터 YAML
     ├── launch/
@@ -111,6 +117,21 @@ pyserial은 apt로 설치한다. pip로 넣으면 ROS2가 인식하지 못하는
 
 ```bash
 sudo apt install python3-serial
+```
+
+`gpio_events` 노드용 gpiozero도 마찬가지로 apt를 우선한다. RPi5는 구형
+`RPi.GPIO`가 쓰던 `/dev/gpiomem` 경로를 그대로 쓰지 않으므로 `lgpio`
+백엔드가 함께 필요하다.
+
+```bash
+sudo apt install python3-gpiozero python3-lgpio
+```
+
+rosdep이 이 키를 못 찾는 배포판이면 pip로 대신 넣는다
+(Debian/Ubuntu 관리형 파이썬에는 `--break-system-packages`를 붙인다).
+
+```bash
+pip install gpiozero lgpio --break-system-packages
 ```
 
 ### 3-3. 빌드
@@ -249,7 +270,11 @@ ros2 launch scout2map_bridge bringup.launch.py
 ros2 launch scout2map_bridge bringup.launch.py drive:=false
 ros2 launch scout2map_bridge sensor_bridge.launch.py    # 센서만, 개별 실행
 ros2 launch scout2map_bridge drive_bridge.launch.py   # 주행만, 개별 실행
+ros2 launch scout2map_bridge gpio_events.launch.py    # GPIO 출력만, 개별 실행
 ```
+
+`gpio_events`는 MCU 시리얼과 무관하므로 `bringup.launch.py`에서 기본으로
+함께 뜬다. 필요 없으면 `gpio:=false`로 끈다.
 
 센서 브릿지가 정상이라면 콘솔에 다음 두 줄이 순서대로 나온다.
 
@@ -494,3 +519,40 @@ __pycache__/
 *.egg-info/
 .vscode/
 ```
+
+---
+
+## 11. gpio_events: 이벤트 → GPIO 출력
+
+이벤트 엔진의 `/events`를 구독해 등록된 RPi5 GPIO 핀을 켜고 끄는 노드다.
+매핑(이벤트 타입 → 핀 + 모드)은 SQLite에 저장되어 재시작 후에도 남고,
+Web-Monitoring 설정 패널에서 comm_relay를 거쳐 추가/삭제할 수 있다
+(`S2M-CommRelay`/`S2M-Web-Monitoring`의 설정 패널 문서 참고).
+
+| 항목 | 값 |
+|---|---|
+| 구독 | `/events` (`std_msgs/String`, JSON) |
+| 매핑 추가/삭제 | `/gpio_events/config_set` (`std_msgs/String`, fire-and-forget) |
+| 매핑 조회 | `/gpio_events/get_all` (`std_srvs/Trigger`) |
+| DB 기본 경로 | `~/.scout2map/gpio_events.db` |
+
+모드는 두 가지다.
+
+| 모드 | 평상시 | 이벤트 발생(`raised`) 시 |
+|---|---|---|
+| `trigger_high` | LOW | HIGH |
+| `trigger_low` | HIGH | LOW |
+
+`state: "cleared"`가 오면 평상시 레벨로 되돌아간다. `VISION_DETECTION`과
+`PREDICTED_*`처럼 `cleared`를 내지 않는 이벤트 타입은 한 번 켜지면 재시작
+전까지 계속 켜진 채로 남으니 매핑하기 전에 감안한다.
+
+하드웨어 없이 개발하려면 `simulate:=true`로 gpiozero의 MockFactory를 쓴다
+(6절의 `fake_sensors`와 같은 목적).
+
+```bash
+ros2 run scout2map_bridge gpio_events --ros-args -p simulate:=true
+```
+
+자세한 파라미터와 매핑 규칙은
+[`scout2map_bridge/README.md` 3부](scout2map_bridge/README.md#3부-gpio_events)를 본다.

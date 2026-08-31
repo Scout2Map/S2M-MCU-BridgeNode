@@ -1,0 +1,25 @@
+gpio_events:
+  ros__parameters:
+    # Event Engine's unified event stream. Mirrors event_engine's own
+    # events_topic default, so this works unmodified alongside a stock
+    # scout2map_event bringup.
+    events_topic: "/events"
+
+    # Fire-and-forget config channel (add/remove a mapping), same shape as
+    # scout2map_event's /threshold/set. S2M-CommRelay publishes here on
+    # behalf of the Web-Monitoring settings panel; nothing stops an operator
+    # from publishing to it directly for scripting/testing.
+    config_topic: "/gpio_events/config_set"
+
+    # Trigger service returning every current mapping as JSON, so a
+    # settings panel can show what is registered before letting an
+    # operator add or remove a row.
+    get_all_service: "/gpio_events/get_all"
+
+    # Empty resolves to GpioMappingDB's own default: ~/.scout2map/gpio_events.db
+    db_path: ""
+
+    # true runs against gpiozero's MockFactory instead of real hardware --
+    # useful for developing the settings panel or this node itself off the
+    # robot. Leave false on the actual RPi5.
+    simulate: false

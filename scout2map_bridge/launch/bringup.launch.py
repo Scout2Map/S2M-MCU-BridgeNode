@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # File   : bringup.launch.py
-# Purpose: Launch both MCU bridges together. This is the normal entry point
-#          on the robot; the per-node launch files are for bring-up and
-#          debugging one board at a time.
+# Purpose: Launch both MCU bridges plus the GPIO event output node together.
+#          This is the normal entry point on the robot; the per-node launch
+#          files are for bring-up and debugging one board at a time.
 #
 # Note: drive_bridge publishes odometry and IMU under its own names,
 # drive/odom and drive/imu. scout2map_event's default parameters (and
@@ -29,6 +29,7 @@ def generate_launch_description():
     pkg_share = get_package_share_directory("scout2map_bridge")
     sensor_params = os.path.join(pkg_share, "config", "sensor_bridge.yaml")
     drive_params = os.path.join(pkg_share, "config", "drive_bridge.yaml")
+    gpio_params = os.path.join(pkg_share, "config", "gpio_events.yaml")
 
     args = [
         DeclareLaunchArgument(
@@ -38,9 +39,14 @@ def generate_launch_description():
             "drive", default_value="true",
             description="Start the STM32 drive control bridge"),
         DeclareLaunchArgument(
+            "gpio", default_value="true",
+            description="Start the event-to-GPIO output node"),
+        DeclareLaunchArgument(
             "sensor_params_file", default_value=sensor_params),
         DeclareLaunchArgument(
             "drive_params_file", default_value=drive_params),
+        DeclareLaunchArgument(
+            "gpio_params_file", default_value=gpio_params),
         DeclareLaunchArgument(
             "odom_topic", default_value="drive/odom",
             description="Where drive_bridge odometry is remapped to. Set "
@@ -77,6 +83,15 @@ def generate_launch_description():
                 ("drive/imu", LaunchConfiguration("imu_topic")),
             ],
             condition=IfCondition(LaunchConfiguration("drive")),
+        ),
+        Node(
+            package="scout2map_bridge",
+            executable="gpio_events",
+            name="gpio_events",
+            output="screen",
+            emulate_tty=True,
+            parameters=[LaunchConfiguration("gpio_params_file")],
+            condition=IfCondition(LaunchConfiguration("gpio")),
         ),
     ]
 

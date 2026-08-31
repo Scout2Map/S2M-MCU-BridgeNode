@@ -566,3 +566,143 @@ BNO055는 캘리브레이션 전에 정지 상태에서도 1~2 deg/s를 출력�
 
 쿼터니언으로 중력을 제거하면 가능하나 IMU 캘리브레이션 품질에 의존하며,
 아직 구현하지 않았다. 현재 신호는 **회전 슬립 전용**으로 다룬다.
+
+# 3부. gpio_events
+
+이벤트 엔진의 `/events`를 구독해 RPi5 GPIO 핀을 켜고 끄는 노드다.
+두 MCU 브릿지와 달리 시리얼 하드웨어를 전혀 쓰지 않고 RPi5 헤더 핀만
+직접 제어하므로, MCU가 하나도 안 붙어 있어도 이 노드만 단독으로 동작한다.
+
+## 23. 매핑 모델
+
+등록 단위는 `(event_type, pin, mode)` 한 행이며, `label`은 UI 표시용
+선택 필드다. 이벤트 타입 하나가 가질 수 있는 매핑 개수에는 제한을
+두지 않았다 — 한 이벤트로 여러 출력(부저 + LED + 릴레이)을 동시에
+켜고 싶은 경우가 흔하기 때문이다.
+
+매핑은 `~/.scout2map/gpio_events.db`(SQLite, `db_path` 파라미터로 변경
+가능)에 저장되어 재시작 후에도 남는다. `threshold_db.py`(이벤트 엔진
+레포)와 동일한 설계다 — 이미 아는 패턴을 그대로 재사용한 것이다.
+
+## 24. 노드 구조
+
+```
+/events (String, JSON)
+   │  {"type": "...", "state": "raised"|"cleared", ...}
+   ▼
+GpioMappingDB.for_event_type(type)  →  이 타입에 걸린 매핑 목록
+   │
+   ▼
+매핑마다: state=="raised" → device.on()  /  그 외 → device.off()
+   │
+   ▼
+gpiozero.OutputDevice (핀 번호로 캐시, 매핑 여러 개가 같은 핀을 공유 가능)
+```
+
+핀별 `OutputDevice`는 지연 생성되며 핀 번호를 키로 캐시된다. 노드
+기동 시 DB에 있는 모든 매핑을 훑어 핀을 미리 만들어 두므로, 재시작
+직후에도 모든 핀이 각자의 idle 레벨로 확정된 채 시작한다 (붕 뜬 상태로
+남지 않는다).
+
+## 25. 파라미터
+
+| 이름 | 기본값 | 설명 |
+|---|---|---|
+| `events_topic` | `/events` | 이벤트 엔진의 통합 이벤트 스트림 |
+| `config_topic` | `/gpio_events/config_set` | 매핑 추가/삭제 명령 (fire-and-forget) |
+| `get_all_service` | `/gpio_events/get_all` | 현재 매핑 전체 조회 |
+| `db_path` | `""` (→ `~/.scout2map/gpio_events.db`) | 매핑 저장 위치 |
+| `simulate` | `false` | true면 gpiozero MockFactory 사용, 실제 핀 미변경 |
+
+## 26. 토픽·서비스
+
+### `/gpio_events/config_set` (구독, `std_msgs/String`)
+
+`/threshold/set`과 동일하게 fire-and-forget이다. JSON 페이로드의
+`action` 필드로 분기한다.
+
+```json
+{"action": "add", "event_type": "HIGH_TEMP", "pin": 17, "mode": "trigger_high", "label": "buzzer"}
+{"action": "remove", "id": 3}
+```
+
+`add`는 유효하지 않은 `mode`를 조용히 거부하고 경고 로그만 남긴다(응답이
+없는 채널이므로 예외를 던져도 호출자가 받을 수 없다). `remove`는 존재하지
+않는 `id`도 마찬가지로 경고만 남긴다.
+
+### `/gpio_events/get_all` (`std_srvs/Trigger`)
+
+`response.message`에 매핑 전체를 JSON 배열로 담아 반환한다. `/threshold/get_all`과
+같은 패턴이라 설정 패널 쪽 구현을 그대로 재사용했다.
+
+```json
+[{"id": 1, "event_type": "HIGH_TEMP", "pin": 17, "mode": "trigger_high", "label": "buzzer"}]
+```
+
+## 27. 모드와 idle 레벨
+
+| 모드 | idle | `raised` |
+|---|---|---|
+| `trigger_high` | LOW | HIGH |
+| `trigger_low` | HIGH | LOW |
+
+`gpiozero.OutputDevice(pin, active_high=(mode=="trigger_high"), initial_value=False)`로
+극성을 gpiozero에 맡기므로, 이 노드의 나머지 코드는 극성을 모르는 채로
+`.on()`/`.off()`만 호출한다. 릴레이·옵토커플러 보드 상당수가 GND로
+끌어내릴 때 동작하는(`trigger_low`) 반면, LED나 트랜지스터 드라이버는
+보통 3.3V를 걸 때 동작한다(`trigger_high`) — 두 모드를 둔 이유다.
+
+`state`가 `"cleared"`면 idle로 돌아간다. **`VISION_DETECTION`과
+`PREDICTED_*` 타입은 이벤트 엔진이 `cleared`를 내지 않는 1회성
+이벤트다**(`event_engine_node.py`의 `_active` 래치는 연속 상태
+이벤트에만 있다) — 이런 타입을 매핑하면 한 번 켜진 뒤 재시작 전까지
+계속 켜진 채로 남는다. 알려진 제약이며 버그가 아니다.
+
+## 28. 공유 핀과 매핑 삭제
+
+같은 핀을 두 개 이상의 매핑이 가리킬 수 있다. 이 노드는 그 사이를
+중재하지 않는다 — **가장 마지막에 도착한 이벤트 전이가 핀 상태를
+결정한다.** 서로 다른 위험이 같은 경보 출력을 공유해도 되는 경우에는
+문제없지만, 독립적으로 켜지고 꺼져야 하는 두 출력이라면 핀을 나눠야 한다.
+
+매핑을 삭제하면 그 핀을 참조하는 다른 매핑이 하나도 안 남았을 때만
+핀을 idle로 되돌리고 `OutputDevice`를 해제한다 — 다른 매핑이 아직
+그 핀을 쓰고 있는데 삭제 한 번으로 릴레이를 꺼버리는 사고를 막기 위함이다.
+
+## 29. 하드웨어 없이 개발하기 (simulate)
+
+`fake_sensors`가 시리얼 하드웨어 없이 센서 쪽을 개발하게 해주듯,
+`simulate:=true`는 GPIO 하드웨어 없이 이 노드와 설정 패널 연동을
+개발하게 해준다. gpiozero의 `MockFactory`로 전환되며 실제 핀은
+전혀 바뀌지 않는다.
+
+```bash
+ros2 run scout2map_bridge gpio_events --ros-args -p simulate:=true
+```
+
+이 상태에서도 `/gpio_events/get_all`과 `/gpio_events/config_set`은
+정상 동작하므로, comm_relay·Web-Monitoring 쪽 통합 시험을 실기 없이
+끝까지 돌릴 수 있다.
+
+## 30. 하드웨어 백엔드
+
+RPi5는 GPIO가 `/dev/gpiomem`이 아닌 새 문자 디바이스(RP1 칩)로 옮겨가서
+구형 `RPi.GPIO`가 그대로 동작하지 않는다. 그래서 라이브러리를 직접
+고르지 않고 **gpiozero**를 쓴다 — gpiozero가 `lgpio`(RPi5), `RPi.GPIO`,
+`pigpio` 순으로 사용 가능한 백엔드를 자동 선택한다. RPi5에서는
+`python3-gpiozero`와 `python3-lgpio`를 함께 설치해야 한다(루트
+`README.md` 3-2절).
+
+## 31. 알려진 제약
+
+- **역방향 확인이 없다.** `add`/`remove` 모두 fire-and-forget이라
+  comm_relay는 0.3초 뒤 `/gpio_events/get_all`을 재조회해 반영을
+  확인한다(`settings-control-panel` 문서의 `/threshold/set`과 동일한
+  트레이드오프).
+- **핀 번호 검증은 최소한이다.** 음수만 막고, 실제 존재하는 GPIO
+  번호인지는 gpiozero/lgpio가 핀을 열 때 실패하는 것으로 드러난다 —
+  RPi5 헤더 배치를 벗어난 번호를 등록하면 해당 매핑만 매 이벤트마다
+  오류 로그를 남기고 다른 매핑에는 영향을 주지 않는다(`_on_event`의
+  매핑별 try/except).
+- **모드는 핀의 첫 등록이 결정한다.** 같은 핀에 서로 다른 `mode`로
+  두 번째 매핑을 추가하면 두 번째 쪽 모드는 무시되고 경고만 남는다.
